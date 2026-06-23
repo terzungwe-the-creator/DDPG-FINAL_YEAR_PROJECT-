@@ -290,7 +290,7 @@ class LaneKeepingEnv(gym.Env):
             # Preview-point feedforward (production ADAS approach)
             # Look ahead by preview_time seconds and steer towards that curvature.
             # This naturally handles dynamic curvature changes (SCN-03, SCN-04).
-            preview_time = 0.6  # seconds — tuned for 60 km/h dynamics
+            preview_time = 0.1  # seconds — tuned to vehicle yaw response lag
             s_preview = self.arc_length_s + v_x * preview_time
             kappa_preview = profile.get_kappa_at_s(s_preview)
         else:
