@@ -299,6 +299,8 @@ class LaneKeepingEnv(gym.Env):
             kappa_preview = kappa_ref
 
         # Understeer gradient: K_us = (m/L) * (l_r/C_af - l_f/C_ar)
+        # Equivalent to standard Wf/Caf - Wr/Car when used with delta = L*kappa + K_us*v^2*kappa
+        # Reference: Rajamani (2012), Eq. 2.26
         K_us = (cfg.VEHICLE_MASS / cfg.VEHICLE_WHEELBASE) * (
             cfg.VEHICLE_LR / cfg.TYRE_CAF_NOMINAL - cfg.VEHICLE_LF / cfg.TYRE_CAR_NOMINAL
         )

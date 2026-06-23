@@ -1,0 +1,23 @@
+# Model checkpoints (560+ MB of .pt files)
+results/checkpoints/
+*.pt
+
+# Training outputs (regenerable)
+results/training_log.csv
+results/system.log
+results/cache/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Generated figures (regenerable)
+results/figures/
+
+# Large documents
+*.docx
+*.pdf
+
+# Diagnostic/scratch scripts
+diag_*.py
