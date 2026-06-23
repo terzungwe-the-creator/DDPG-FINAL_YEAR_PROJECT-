@@ -1,0 +1,21 @@
+# DDPG Lane Keeping — Industrial-Grade Simulation & Data Fusion
+# Version: 3.0
+# Python >= 3.10
+
+# Core ML
+torch>=2.0.0
+numpy>=1.24.0
+
+# Data & Science
+pandas>=2.0.0
+scipy>=1.10.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Gym Environment
+gymnasium>=0.28.0
+
+# Dataset adapters (optional — install if using external datasets)
+# av2>=0.2.1              # DS-03: Argoverse 2 (pip install av2)
+# openpyxl>=3.1.0         # For Excel-based dataset manifests

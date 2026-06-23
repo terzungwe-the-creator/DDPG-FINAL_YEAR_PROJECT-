@@ -1,0 +1,258 @@
+"""
+agent.py — DDPG Agent with Delayed Policy Updates
+
+Implements the Deep Deterministic Policy Gradient algorithm with:
+    - Delayed policy updates (every 2 critic updates) — TD3-style.
+      Reference: Fujimoto et al. (2018), "Addressing Function Approximation
+      Error in Actor-Critic Methods", arXiv:1802.09477.
+    - Polyak-averaged target networks (τ = 0.005).
+      Reference: Lillicrap et al. (2016), arXiv:1509.02971, Appendix C.
+    - Gradient clipping on critic (max norm = 1.0) to prevent Q-value
+      divergence on large rewards.
+
+The agent operates on normalised observations and actions.
+The actor outputs actions in [-1, 1], which are scaled to physical steering
+angles by the environment.
+"""
+
+from __future__ import annotations
+
+import copy
+from pathlib import Path
+from typing import Dict, Optional
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+import config as cfg
+from ddpg.networks import Actor, Critic
+from ddpg.hybrid_buffer import HybridStratifiedBuffer
+
+
+class DDPGAgent:
+    """
+    DDPG agent with delayed policy updates and target networks.
+
+    Attributes:
+        actor:          Online actor network.
+        critic:         Online critic network.
+        actor_target:   Target actor network (Polyak-averaged).
+        critic_target:  Target critic network (Polyak-averaged).
+        actor_optim:    Actor optimiser (Adam).
+        critic_optim:   Critic optimiser (Adam).
+        device:         Compute device.
+        update_count:   Total number of critic updates performed.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int = cfg.OBS_DIM,
+        act_dim: int = cfg.ACT_DIM,
+        actor_lr: float = cfg.ACTOR_LR,
+        critic_lr: float = cfg.CRITIC_LR,
+        gamma: float = cfg.GAMMA,
+        tau: float = cfg.TAU,
+        policy_update_freq: int = cfg.POLICY_UPDATE_FREQ,
+        critic_grad_clip: float = cfg.CRITIC_GRAD_CLIP,
+        device: str = "cpu",
+    ) -> None:
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self.gamma = gamma
+        self.tau = tau
+        self.policy_update_freq = policy_update_freq
+        self.critic_grad_clip = critic_grad_clip
+        self.device = torch.device(device)
+
+        # Online networks
+        self.actor = Actor(obs_dim, act_dim).to(self.device)
+        self.critic = Critic(obs_dim, act_dim).to(self.device)
+
+        # Target networks (deep copy, no grad)
+        self.actor_target = copy.deepcopy(self.actor).to(self.device)
+        self.critic_target = copy.deepcopy(self.critic).to(self.device)
+
+        # Freeze target network parameters
+        for p in self.actor_target.parameters():
+            p.requires_grad = False
+        for p in self.critic_target.parameters():
+            p.requires_grad = False
+
+        # Optimisers
+        self.actor_optim = optim.Adam(self.actor.parameters(), lr=actor_lr)
+        self.critic_optim = optim.Adam(self.critic.parameters(), lr=critic_lr)
+
+        # Update counter for delayed policy updates
+        self.update_count: int = 0
+
+    def select_action(self, state: np.ndarray, add_noise: bool = False) -> np.ndarray:
+        """
+        Select action using the online actor network (deterministic policy).
+
+        Args:
+            state:     Observation array, shape (obs_dim,).
+            add_noise: Unused (noise is added externally in training loop).
+
+        Returns:
+            Action array in [-1, 1], shape (act_dim,).
+        """
+        state_tensor = torch.tensor(
+            state, dtype=torch.float32, device=self.device
+        ).unsqueeze(0)
+
+        self.actor.eval()
+        with torch.no_grad():
+            action = self.actor(state_tensor)
+        self.actor.train()
+
+        return action.cpu().numpy().flatten()
+
+    def update(
+        self, buffer: HybridStratifiedBuffer, episode: int
+    ) -> Dict[str, float]:
+        """
+        Perform one DDPG update step.
+
+        Steps:
+            1. Sample a mini-batch from the hybrid stratified buffer.
+            2. Compute critic target: y = r + γ · (1 − d) · Q_target(s', μ_target(s'))
+            3. Update critic by minimising MSE loss: L = (Q(s,a) − y)²
+            4. Every `policy_update_freq` steps, update actor by maximising Q(s, μ(s))
+            5. Soft-update target networks via Polyak averaging.
+
+        Args:
+            buffer:  Hybrid stratified replay buffer.
+            episode: Current episode number (for phase-aware sampling).
+
+        Returns:
+            Dictionary with training metrics:
+                critic_loss, actor_loss, q_mean, q_std.
+        """
+        if not buffer.has_enough(cfg.BATCH_SIZE):
+            return {"critic_loss": 0.0, "actor_loss": 0.0, "q_mean": 0.0, "q_std": 0.0}
+
+        # 1. Sample batch
+        states, actions, rewards, next_states, dones = buffer.sample(
+            cfg.BATCH_SIZE, episode
+        )
+
+        # 2. Compute critic target
+        with torch.no_grad():
+            next_actions = self.actor_target(next_states)
+            q_target_next = self.critic_target(next_states, next_actions)
+            y = rewards + self.gamma * (1.0 - dones) * q_target_next
+
+        # 3. Update critic
+        q_current = self.critic(states, actions)
+        critic_loss = nn.functional.mse_loss(q_current, y)
+
+        self.critic_optim.zero_grad()
+        critic_loss.backward()
+
+        # Gradient clipping on critic
+        nn.utils.clip_grad_norm_(
+            self.critic.parameters(), self.critic_grad_clip
+        )
+        self.critic_optim.step()
+
+        self.update_count += 1
+
+        # Metrics
+        q_vals = q_current.detach()
+        metrics = {
+            "critic_loss": float(critic_loss.item()),
+            "actor_loss": 0.0,
+            "q_mean": float(q_vals.mean().item()),
+            "q_std": float(q_vals.std().item()),
+        }
+
+        # 4. Delayed policy update
+        if self.update_count % self.policy_update_freq == 0:
+            # Maximise Q(s, μ(s))
+            predicted_actions = self.actor(states)
+            actor_loss = -self.critic(states, predicted_actions).mean()
+
+            self.actor_optim.zero_grad()
+            actor_loss.backward()
+            self.actor_optim.step()
+
+            metrics["actor_loss"] = float(actor_loss.item())
+
+            # 5. Soft-update target networks
+            self._soft_update(self.actor, self.actor_target)
+            self._soft_update(self.critic, self.critic_target)
+
+        return metrics
+
+    def _soft_update(self, source: nn.Module, target: nn.Module) -> None:
+        """
+        Polyak-average update of target network parameters.
+
+        θ_target ← τ · θ_source + (1 − τ) · θ_target
+
+        Reference: Lillicrap et al. (2016), Eq. 5.
+
+        Args:
+            source: Online network.
+            target: Target network.
+        """
+        for param_s, param_t in zip(source.parameters(), target.parameters()):
+            param_t.data.copy_(
+                self.tau * param_s.data + (1.0 - self.tau) * param_t.data
+            )
+
+    def save_checkpoint(self, episode: int, path: Optional[Path] = None, suffix: str = "") -> Path:
+        """
+        Save actor, critic, and optimiser states.
+
+        Args:
+            episode: Current episode number (used in filename).
+            path:    Directory to save to. Default: CHECKPOINTS_DIR.
+            suffix:  Optional suffix for the filename (e.g. '_best').
+
+        Returns:
+            Path to saved checkpoint file.
+        """
+        if path is None:
+            path = cfg.CHECKPOINTS_DIR
+        path.mkdir(parents=True, exist_ok=True)
+
+        filepath = path / f"ddpg_checkpoint_ep{episode:04d}{suffix}.pt"
+        torch.save(
+            {
+                "episode": episode,
+                "actor_state_dict": self.actor.state_dict(),
+                "critic_state_dict": self.critic.state_dict(),
+                "actor_target_state_dict": self.actor_target.state_dict(),
+                "critic_target_state_dict": self.critic_target.state_dict(),
+                "actor_optim_state_dict": self.actor_optim.state_dict(),
+                "critic_optim_state_dict": self.critic_optim.state_dict(),
+                "update_count": self.update_count,
+            },
+            filepath,
+        )
+        return filepath
+
+    def load_checkpoint(self, filepath: Path) -> int:
+        """
+        Load actor, critic, and optimiser states from a checkpoint.
+
+        Args:
+            filepath: Path to checkpoint .pt file.
+
+        Returns:
+            Episode number from the checkpoint.
+        """
+        checkpoint = torch.load(filepath, map_location=self.device, weights_only=False)
+
+        self.actor.load_state_dict(checkpoint["actor_state_dict"])
+        self.critic.load_state_dict(checkpoint["critic_state_dict"])
+        self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
+        self.critic_target.load_state_dict(checkpoint["critic_target_state_dict"])
+        self.actor_optim.load_state_dict(checkpoint["actor_optim_state_dict"])
+        self.critic_optim.load_state_dict(checkpoint["critic_optim_state_dict"])
+        self.update_count = checkpoint["update_count"]
+
+        return checkpoint["episode"]
