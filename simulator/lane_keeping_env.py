@@ -311,9 +311,9 @@ class LaneKeepingEnv(gym.Env):
         )
 
         # ── Feedback: RL agent correction ────────────────────────────────
-        # Agent correction scaled to 0.3*DELTA_MAX — feedforward handles bulk
+        # Agent correction scaled to 0.8*DELTA_MAX — feedforward handles bulk
         # steering; agent provides only small corrections for disturbance rejection
-        correction_authority = 0.3 * cfg.DELTA_MAX
+        correction_authority = 0.8 * cfg.DELTA_MAX
         delta_correction = action_scalar * correction_authority
 
         # ── Combined steering command ────────────────────────────────────
