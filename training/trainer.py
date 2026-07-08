@@ -154,6 +154,18 @@ class Trainer:
         self.preload_stats: Optional[PreloadStats] = None
         self.pretrain_rmse: float = float("nan")
 
+        # Sim-only mode detection
+        self.sim_only_mode: bool = skip_ds01 and skip_ds02 and skip_ds03
+        if self.sim_only_mode:
+            logger.info("SIM-ONLY MODE: All datasets skipped — using adapted hyperparameters")
+            self._warmup_steps = cfg.SIM_ONLY_WARMUP_STEPS
+            self._updates_per_step = cfg.SIM_ONLY_UPDATES_PER_STEP
+            self._noise_sigma_init = cfg.SIM_ONLY_NOISE_SIGMA_INIT
+        else:
+            self._warmup_steps = cfg.WARMUP_STEPS
+            self._updates_per_step = cfg.UPDATES_PER_STEP
+            self._noise_sigma_init = cfg.NOISE_SIGMA_INIT
+
     def run(self) -> Dict:
         """
         Execute the complete training pipeline.
@@ -192,8 +204,10 @@ class Trainer:
         else:
             logger.info("Using nominal tyre parameters (calibration R² < 0.85 or no data)")
 
-        # M-22: Pretrain-only evaluation
-        if self.buffer.total_size >= cfg.BATCH_SIZE:
+        # M-22: Pretrain-only evaluation (skip cleanly in sim-only mode)
+        if self.sim_only_mode:
+            logger.info("SIM-ONLY MODE: Skipping M-22 pretrain evaluation (no expert data)")
+        elif self.buffer.total_size >= cfg.BATCH_SIZE:
             logger.info("Computing M-22: Pretraining performance...")
             self.pretrain_rmse = compute_pretrain_performance(
                 agent=self.agent,
@@ -221,14 +235,15 @@ class Trainer:
             phase_name = get_curriculum_phase_name(episode)
 
             # Reset environment
-            state, _ = self.env.reset(scenario_id=scenario_id)
+            state, _ = self.env.reset(scenario_id=scenario_id,
+                                       e_lat_init=np.random.uniform(-0.3, 0.3) if episode > 10 else 0.0)
             self.noise.reset()
             self.noise.set_sigma(cfg.get_noise_sigma(episode))
 
             done = False
             while not done:
                 # Action selection
-                if total_steps < cfg.WARMUP_STEPS:
+                if total_steps < self._warmup_steps:
                     action = self.env.action_space.sample()
                 else:
                     action = self.agent.select_action(state)
@@ -244,10 +259,11 @@ class Trainer:
                     "sim", state, action, reward, next_state, float(done)
                 )
 
-                # Agent update
-                if total_steps >= cfg.WARMUP_STEPS:
-                    update_info = self.agent.update(self.buffer, episode)
-                    self.training_logger.log_step(update_info)
+                # Agent update (with configurable UTD ratio)
+                if total_steps >= self._warmup_steps:
+                    for _ in range(self._updates_per_step):
+                        update_info = self.agent.update(self.buffer, episode)
+                        self.training_logger.log_step(update_info)
 
                 state = next_state
                 total_steps += 1

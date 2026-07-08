@@ -1,14 +1,12 @@
 """
-curriculum.py — Scenario Curriculum Schedule
+curriculum.py — Round-Robin Scenario Curriculum Schedule
 
-Implements the phased curriculum that progressively introduces harder
-road scenarios as training progresses.
+Implements failure-weighted round-robin sampling that progressively
+introduces all road scenarios as training progresses.
 
 Schedule:
-    Phase 1 (ep   0–150): SCN-01 only (straight road)
-    Phase 2 (ep 150–300): SCN-01, SCN-02 (add constant curve)
-    Phase 3 (ep 300–450): SCN-01, SCN-02, SCN-03 (add sinusoidal)
-    Phase 4 (ep 450–600): All five scenarios
+    Phase 1 (ep   0– 30): SCN-01, SCN-02 (warmup)
+    Phase 2 (ep  30+):    All five scenarios (failure-weighted)
 """
 
 from __future__ import annotations
@@ -30,12 +28,8 @@ def get_curriculum_scenarios(episode: int) -> List[str]:
     Returns:
         List of scenario IDs available for this episode.
     """
-    for phase_name, phase_info in cfg.CURRICULUM_PHASES.items():
-        ep_start, ep_end = phase_info["episodes"]
-        if ep_start <= episode < ep_end:
-            return list(phase_info["scenarios"])
-
-    # Default: all scenarios (beyond defined phases)
+    if episode < 30:
+        return list(cfg.SCENARIO_IDS[:2])  # SCN-01, SCN-02 warmup
     return list(cfg.SCENARIO_IDS)
 
 
@@ -64,10 +58,12 @@ def get_curriculum_phase_name(episode: int) -> str:
         episode: Current training episode number.
 
     Returns:
-        Phase name string (e.g. 'phase1').
+        Phase name string.
     """
-    for phase_name, phase_info in cfg.CURRICULUM_PHASES.items():
-        ep_start, ep_end = phase_info["episodes"]
-        if ep_start <= episode < ep_end:
-            return phase_name
-    return "phase4"
+    if episode < 30:
+        return "phase1-warmup"
+    elif episode < 200:
+        return "phase2-allscenes"
+    elif episode < 500:
+        return "phase3-refinement"
+    return "phase4-polish"

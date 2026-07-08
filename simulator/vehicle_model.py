@@ -91,6 +91,9 @@ class BicycleModel:
         # Pre-compute wheelbase
         self.L = self.l_f + self.l_r
 
+        # Actuator lag state
+        self.actual_delta = 0.0
+
         # Current state vector
         self.state = np.zeros(self.N_STATES, dtype=np.float64)
 
@@ -118,6 +121,7 @@ class BicycleModel:
         self.state[self.IDX_ELAT] = e_lat_init
         self.state[self.IDX_EPSI] = e_psi_init
         self.state[self.IDX_PSI] = psi_init
+        self.actual_delta = 0.0
         return self.state.copy()
 
     def update_tyre_params(self, C_af: float, C_ar: float) -> None:
@@ -143,39 +147,51 @@ class BicycleModel:
         self.C_ar = C_ar
 
     def _compute_tyre_forces(
-        self, v_x: float, v_y: float, r: float, delta: float
+        self, v_x: float, v_y: float, r: float, delta: float, friction_mu: float
     ) -> tuple[float, float]:
         """
         Compute front and rear lateral tyre forces.
 
-        Linear tyre model — Rajamani (2012) Eq. 3.9, 3.10:
-            α_f = δ − arctan((v_y + l_f·r) / v_x)
-            α_r =   − arctan((v_y − l_r·r) / v_x)
-            F_yf = −C_af · α_f
-            F_yr = −C_ar · α_r
+        Pacejka Magic Formula (Simplified) to model saturation:
+            F_y = D * sin(C * arctan(B * alpha))
+            D = mu * F_z (peak force)
+            B = C_alpha / (C * D) (stiffness factor)
 
         Args:
             v_x:   Longitudinal velocity (m/s)
             v_y:   Lateral velocity (m/s)
             r:     Yaw rate (rad/s)
             delta: Front wheel steering angle (rad)
+            friction_mu: Road friction coefficient
 
         Returns:
             (F_yf, F_yr) — front and rear lateral forces in Newtons.
         """
-        # Clamp v_x to prevent division by zero at low speed
         v_x_safe = max(abs(v_x), 0.5)
 
         alpha_f = np.arctan2(v_y + self.l_f * r, v_x_safe) - delta
         alpha_r = np.arctan2(v_y - self.l_r * r, v_x_safe)
 
-        F_yf = -self.C_af * alpha_f
-        F_yr = -self.C_ar * alpha_r
+        # Normal loads
+        F_zf = self.m * 9.81 * self.l_r / self.L
+        F_zr = self.m * 9.81 * self.l_f / self.L
+        
+        # Pacejka constants
+        C = 1.3  # Shape factor
+        D_f = friction_mu * F_zf
+        D_r = friction_mu * F_zr
+        
+        B_f = self.C_af / (C * D_f) if D_f > 0 else 1.0
+        B_r = self.C_ar / (C * D_r) if D_r > 0 else 1.0
+
+        # Use -alpha since C_a applies a negative feedback
+        F_yf = D_f * np.sin(C * np.arctan(B_f * -alpha_f))
+        F_yr = D_r * np.sin(C * np.arctan(B_r * -alpha_r))
 
         return F_yf, F_yr
 
     def _dynamics(
-        self, state: np.ndarray, delta: float, kappa_ref: float
+        self, state: np.ndarray, delta: float, kappa_ref: float, friction_mu: float, bank_angle_rad: float
     ) -> np.ndarray:
         """
         Compute state derivatives ẋ for the nonlinear bicycle model.
@@ -185,7 +201,7 @@ class BicycleModel:
             ẋ[1] = v_x·sin(ψ) + v_y·cos(ψ)        # Ẏ (global Y)
             ẋ[2] = r                                 # ψ̇ (yaw)
             ẋ[3] = 0.0                              # v̇_x (constant speed)
-            ẋ[4] = (F_yf + F_yr)/m − v_x·r          # v̇_y (lateral accel)
+            ẋ[4] = (F_yf + F_yr)/m − v_x·r + g·sin(θ) # v̇_y (lateral accel + gravity)
             ẋ[5] = (l_f·F_yf − l_r·F_yr)/I_z        # ṙ (yaw accel)
             ẋ[6] = v_x·sin(e_psi) + v_y·cos(e_psi)  # ė_lat
             ẋ[7] = r − κ_ref·v_x                    # ė_psi
@@ -194,27 +210,40 @@ class BicycleModel:
             state:     8-dimensional state vector.
             delta:     Front wheel steering angle (rad).
             kappa_ref: Road reference curvature at current position (1/m).
+            friction_mu: Road friction coefficient.
+            bank_angle_rad: Road bank/camber angle (rad).
 
         Returns:
             8-dimensional state derivative vector.
         """
         X, Y, psi, v_x, v_y, r, e_lat, e_psi = state
 
-        F_yf, F_yr = self._compute_tyre_forces(v_x, v_y, r, delta)
+        F_yf, F_yr = self._compute_tyre_forces(v_x, v_y, r, delta, friction_mu)
 
         dx = np.zeros(self.N_STATES, dtype=np.float64)
         dx[0] = v_x * np.cos(psi) - v_y * np.sin(psi)        # Ẋ
         dx[1] = v_x * np.sin(psi) + v_y * np.cos(psi)        # Ẏ
         dx[2] = r                                               # ψ̇
         dx[3] = 0.0                                             # v̇_x (constant)
-        dx[4] = (F_yf + F_yr) / self.m - v_x * r              # v̇_y
+        dx[4] = (F_yf + F_yr) / self.m - v_x * r + 9.81 * np.sin(bank_angle_rad) # v̇_y
         dx[5] = (self.l_f * F_yf - self.l_r * F_yr) / self.I_z  # ṙ
         dx[6] = v_x * np.sin(e_psi) + v_y * np.cos(e_psi)    # ė_lat
         dx[7] = r - kappa_ref * v_x                            # ė_psi
 
         return dx
 
-    def step(self, delta: float, kappa_ref: float) -> np.ndarray:
+    def step(
+        self,
+        delta_cmd: float = None,
+        kappa_ref: float = 0.0,
+        friction_mu: float = 1.0,
+        bank_angle_rad: float = 0.0,
+        delta: float = None,
+    ) -> np.ndarray:
+        if delta is not None:
+            delta_cmd = delta
+        if delta_cmd is None:
+            delta_cmd = 0.0
         """
         Advance the vehicle state by one timestep using RK4 integration.
 
@@ -226,21 +255,29 @@ class BicycleModel:
             x_new = x + dt/6·(k1 + 2·k2 + 2·k3 + k4)
 
         Args:
-            delta:     Front wheel steering angle (rad), will be clamped
-                       to [-DELTA_MAX, DELTA_MAX].
+            delta_cmd: Commanded front wheel steering angle (rad).
             kappa_ref: Road reference curvature at current position (1/m).
+            friction_mu: Road friction coefficient.
+            bank_angle_rad: Road bank/camber angle (rad).
 
         Returns:
             Updated state vector (copy).
         """
-        # Clamp steering input to hardware limits
-        delta = np.clip(delta, -cfg.DELTA_MAX, cfg.DELTA_MAX)
+        # Clamp commanded steering input
+        delta_cmd = np.clip(delta_cmd, -cfg.DELTA_MAX, cfg.DELTA_MAX)
+
+        # Actuator lag (first order low-pass)
+        tau = 0.1  # 100ms time constant
+        alpha_filter = self.dt / (tau + self.dt)
+        self.actual_delta = (1.0 - alpha_filter) * self.actual_delta + alpha_filter * delta_cmd
+        
+        delta = self.actual_delta
 
         # RK4 integration
-        k1 = self._dynamics(self.state, delta, kappa_ref)
-        k2 = self._dynamics(self.state + 0.5 * self.dt * k1, delta, kappa_ref)
-        k3 = self._dynamics(self.state + 0.5 * self.dt * k2, delta, kappa_ref)
-        k4 = self._dynamics(self.state + self.dt * k3, delta, kappa_ref)
+        k1 = self._dynamics(self.state, delta, kappa_ref, friction_mu, bank_angle_rad)
+        k2 = self._dynamics(self.state + 0.5 * self.dt * k1, delta, kappa_ref, friction_mu, bank_angle_rad)
+        k3 = self._dynamics(self.state + 0.5 * self.dt * k2, delta, kappa_ref, friction_mu, bank_angle_rad)
+        k4 = self._dynamics(self.state + self.dt * k3, delta, kappa_ref, friction_mu, bank_angle_rad)
 
         self.state = self.state + (self.dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 

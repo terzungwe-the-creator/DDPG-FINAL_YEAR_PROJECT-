@@ -158,6 +158,35 @@ def reward_terminal(e_lat: float) -> float:
     return 0.0
 
 
+def reward_boundary_proximity(e_lat: float) -> float:
+    """
+    Continuous penalty that increases as the vehicle approaches the lane boundary.
+
+    Activates when |e_lat| > 50% of half-lane-width (i.e. beyond 0.875 m).
+    Provides gradient signal BEFORE departure, encouraging the agent to learn
+    recovery maneuvers rather than only learning "don't depart."
+
+    Reference: Code review §3.5 — terminal-proximity reward shaping.
+
+    Formulation:
+        margin = LANE_WIDTH_HALF - |e_lat|
+        If margin > 50% of LANE_WIDTH_HALF: 0.0 (not in danger zone)
+        Else: -(1 - margin / (0.5 * LANE_WIDTH_HALF))^2
+
+    Args:
+        e_lat: Lateral deviation from lane centre (m), signed.
+
+    Returns:
+        Scalar penalty in [-1, 0].
+    """
+    margin = cfg.LANE_WIDTH_HALF - abs(e_lat)
+    if margin > cfg.LANE_WIDTH_HALF * 0.5:  # Not in danger zone
+        return 0.0
+    # Quadratic penalty approaching boundary
+    danger_frac = 1.0 - (margin / (cfg.LANE_WIDTH_HALF * 0.5))
+    return -danger_frac ** 2  # Max penalty: -1.0 at boundary
+
+
 def compute_reward(
     e_lat: float,
     e_psi: float,
@@ -167,7 +196,7 @@ def compute_reward(
     terminated: bool,
 ) -> tuple[float, dict]:
     """
-    Compute the total composite reward from all five components.
+    Compute the total composite reward from all six components.
 
     This function is used by:
     1. The simulator environment (lane_keeping_env.py) for RL rollouts.
@@ -176,7 +205,7 @@ def compute_reward(
     fused replay buffer.
 
     Total: r = w_lat·r_lat + w_head·r_head + w_smooth·r_smooth + w_prog·r_prog
-              + r_terminal
+              + w_boundary·r_boundary + r_terminal
 
     Args:
         e_lat:          Lateral error (m).
@@ -194,6 +223,7 @@ def compute_reward(
     r_head = reward_heading(e_psi)
     r_smooth = reward_smoothness(delta_current, delta_previous)
     r_prog = reward_progress(v_x, e_psi)
+    r_boundary = reward_boundary_proximity(e_lat)
     r_term = reward_terminal(e_lat) if terminated else 0.0
 
     total = (
@@ -201,6 +231,7 @@ def compute_reward(
         + cfg.REWARD_W_HEADING * r_head
         + cfg.REWARD_W_SMOOTH * r_smooth
         + cfg.REWARD_W_PROGRESS * r_prog
+        + cfg.REWARD_W_BOUNDARY * r_boundary
         + r_term
     )
 
@@ -209,6 +240,7 @@ def compute_reward(
         "r_heading": r_head,
         "r_smoothness": r_smooth,
         "r_progress": r_prog,
+        "r_boundary": r_boundary,
         "r_terminal": r_term,
         "r_total": total,
     }

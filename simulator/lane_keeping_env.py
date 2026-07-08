@@ -206,11 +206,13 @@ class LaneKeepingEnv(gym.Env):
         # ── Domain randomization ──────────────────────────────────────────
         dr_params = self.domain_randomizer.randomize()
         if self.training_mode and self.vehicle is not None:
-            # Apply randomized tyre parameters to vehicle model
-            self.vehicle.update_tyre_params(dr_params.C_af, dr_params.C_ar)
-            # Apply randomized mass (if vehicle model supports it)
-            if hasattr(self.vehicle, 'mass'):
-                self.vehicle.mass = dr_params.mass_kg
+            # Apply randomized tyre parameters scaled by friction coefficient
+            # C_effective = C_nominal_randomized * friction_mu
+            effective_caf = dr_params.C_af * dr_params.friction_mu
+            effective_car = dr_params.C_ar * dr_params.friction_mu
+            self.vehicle.update_tyre_params(effective_caf, effective_car)
+            # Apply randomized mass (BicycleModel uses 'm' attribute)
+            self.vehicle.m = dr_params.mass_kg
 
         self.vehicle.reset(
             v_x=self.episode_speed,
@@ -276,8 +278,7 @@ class LaneKeepingEnv(gym.Env):
         
         # ── Action Smoothing (Low-pass filter) ───────────────────────────
         # Prevents high-frequency oscillations induced by observation noise/latency
-        # alpha = 0.7 means 70% new action, 30% previous action
-        alpha = 0.7
+        alpha = cfg.ACTION_SMOOTHING_ALPHA
         action_scalar = alpha * raw_action + (1.0 - alpha) * getattr(self, 'action_prev', 0.0)
         self.action_prev = action_scalar
 
@@ -290,7 +291,7 @@ class LaneKeepingEnv(gym.Env):
             # Preview-point feedforward (production ADAS approach)
             # Look ahead by preview_time seconds and steer towards that curvature.
             # This naturally handles dynamic curvature changes (SCN-03, SCN-04).
-            preview_time = 0.1  # seconds — tuned to vehicle yaw response lag
+            preview_time = cfg.PREVIEW_TIME  # 0.8s — matched to vehicle yaw response lag
             s_preview = self.arc_length_s + v_x * preview_time
             kappa_preview = profile.get_kappa_at_s(s_preview)
         else:
@@ -313,9 +314,9 @@ class LaneKeepingEnv(gym.Env):
         )
 
         # ── Feedback: RL agent correction ────────────────────────────────
-        # Agent correction scaled to 0.8*DELTA_MAX — feedforward handles bulk
-        # steering; agent provides only small corrections for disturbance rejection
-        correction_authority = 0.8 * cfg.DELTA_MAX
+        # Agent correction scaled to CORRECTION_AUTHORITY × DELTA_MAX
+        # Full authority (1.0) allows agent to use full steering range for corrections
+        correction_authority = cfg.CORRECTION_AUTHORITY * cfg.DELTA_MAX
         delta_correction = action_scalar * correction_authority
 
         # ── Combined steering command ────────────────────────────────────
@@ -339,7 +340,9 @@ class LaneKeepingEnv(gym.Env):
         delta_safe = self.guardian.apply(delta_cmd, self.delta_prev, cfg.SIM_DT)
 
         # Integrate vehicle dynamics (one RK4 step) with SAFE command
-        self.vehicle.step(delta_safe, kappa_ref)
+        friction = self.domain_randomizer.params.friction_mu if self.training_mode else 1.0
+        bank = self.domain_randomizer.params.bank_angle_rad if self.training_mode else 0.0
+        self.vehicle.step(delta_safe, kappa_ref, friction_mu=friction, bank_angle_rad=bank)
 
         # ── Wind disturbance (domain randomization) ───────────────────────
         # Apply lateral wind force as a small perturbation to lateral error
@@ -438,10 +441,26 @@ class LaneKeepingEnv(gym.Env):
             self.arc_length_s, self.vehicle.v_x
         )
 
+        e_lat_obs = self.vehicle.lateral_error
+        e_psi_obs = self.vehicle.heading_error
+
+        if self.training_mode and self.domain_randomizer.enabled:
+            # 1. Camera Bias
+            e_lat_obs += self.domain_randomizer.params.camera_bias_m
+
+            # 2. Gaussian Noise
+            e_lat_obs += np.random.normal(0, self.obs_noise_std)
+            e_psi_obs += np.random.normal(0, self.obs_noise_std * 0.5)
+
+            # 3. Random Dropout (1% chance to lose lane lines)
+            if np.random.rand() < 0.01:
+                e_lat_obs = 0.0
+                e_psi_obs = 0.0
+
         obs = np.array(
             [
-                self.vehicle.lateral_error / cfg.NORM_E_LAT,
-                self.vehicle.heading_error / cfg.NORM_E_PSI,
+                e_lat_obs / cfg.NORM_E_LAT,
+                e_psi_obs / cfg.NORM_E_PSI,
                 kappa_ref / cfg.NORM_KAPPA,
                 self.vehicle.v_y / cfg.NORM_V_Y,
                 self.vehicle.yaw_rate / cfg.NORM_YAW_RATE,
@@ -452,23 +471,13 @@ class LaneKeepingEnv(gym.Env):
             dtype=np.float32,
         )
 
-        # ── Observation noise injection (training only) ───────────────────
-        # Simulates real sensor noise: camera lane detection uncertainty,
-        # IMU noise, curvature estimation error.
-        # N(0, 0.05) per dimension = 5% of normalised range.
-        if self.training_mode and self.obs_noise_std > 0.0:
-            noise = np.random.normal(0.0, self.obs_noise_std, size=obs.shape)
-            obs = obs + noise.astype(np.float32)
-
         obs = np.clip(obs, -1.0, 1.0)
 
-        # ── Observation latency (training only, domain randomization) ─────
-        # Simulates camera/processing pipeline delay (0–30 ms at 100 Hz)
+        # 4. Apply Stochastic Latency (delayed observation)
         if self.training_mode:
             obs = self.domain_randomizer.apply_obs_latency(obs)
 
         return obs
-
     @property
     def episode_data(self) -> list[dict]:
         """Return the list of step info dicts for the current episode."""

@@ -57,6 +57,29 @@ class RoadProfile:
     total_length: float
     speed_profile: np.ndarray
 
+    def __post_init__(self):
+        """Build O(1) curvature lookup table after construction."""
+        self._build_fast_lookup()
+
+    def _build_fast_lookup(self, ds_lookup: float = 0.5):
+        """
+        Pre-compute curvature lookup table for O(1) queries.
+
+        Instead of calling np.interp (O(log N) binary search) on every
+        environment step, we pre-interpolate curvature onto a regular grid
+        and use integer division for O(1) lookup.
+
+        Args:
+            ds_lookup: LUT grid spacing (m). 0.5m gives <0.5% interpolation
+                       error vs the full resolution profile.
+        """
+        self._lookup_ds = ds_lookup
+        n_bins = int(self.total_length / ds_lookup) + 2
+        s_bins = np.arange(n_bins) * ds_lookup
+        self._kappa_lut = np.interp(s_bins, self.arc_length, self.kappa_ref).astype(np.float64)
+        self._psi_lut = np.interp(s_bins, self.arc_length, self.psi_ref).astype(np.float64)
+        self._n_bins = n_bins
+
     def get_reference_at_s(self, s: float) -> dict:
         """
         Interpolate reference values at arbitrary arc length s.
@@ -76,15 +99,19 @@ class RoadProfile:
         return {"x": x, "y": y, "psi": psi, "kappa": kappa, "speed": speed}
 
     def get_kappa_at_s(self, s: float) -> float:
-        """Interpolate curvature at arc length s."""
-        return float(np.interp(np.clip(s, 0.0, self.total_length),
-                               self.arc_length, self.kappa_ref))
+        """O(1) curvature lookup via pre-computed LUT."""
+        idx = int(s / self._lookup_ds)
+        if idx < 0:
+            idx = 0
+        elif idx >= self._n_bins:
+            idx = self._n_bins - 1
+        return float(self._kappa_lut[idx])
 
     def get_lookahead_kappa(self, s: float, v_x: float,
                             lookahead_times: tuple[float, float] = (1.0, 2.0)
                             ) -> tuple[float, float]:
         """
-        Compute curvature at lookahead positions.
+        Compute curvature at lookahead positions using fast LUT.
 
         Args:
             s: Current arc length (m).
@@ -111,7 +138,7 @@ def _integrate_path(kappa_fn, total_length: float, speed_fn=None,
     """
     Integrate a curvature function to produce a full road profile.
 
-    Uses forward Euler on the Frenet–Serret equations:
+    Uses vectorized cumulative summation of the Frenet–Serret equations:
         ψ(s+ds) = ψ(s) + κ(s)·ds
         x(s+ds) = x(s) + cos(ψ(s))·ds
         y(s+ds) = y(s) + sin(ψ(s))·ds
@@ -129,21 +156,25 @@ def _integrate_path(kappa_fn, total_length: float, speed_fn=None,
     n = int(np.ceil(total_length / ds)) + 1
     s_arr = np.linspace(0.0, total_length, n)
 
-    x = np.zeros(n)
-    y = np.zeros(n)
-    psi = np.zeros(n)
-    kappa = np.zeros(n)
-    speed = np.zeros(n)
+    # Vectorize curvature and speed computation (eliminates Python for-loop)
+    kappa_vec = np.vectorize(kappa_fn)
+    kappa = kappa_vec(s_arr)
 
-    for i in range(n):
-        s = s_arr[i]
-        kappa[i] = kappa_fn(s)
-        speed[i] = speed_fn(s) if speed_fn is not None else cfg.V_REFERENCE
+    if speed_fn is not None:
+        speed_vec = np.vectorize(speed_fn)
+        speed = speed_vec(s_arr)
+    else:
+        speed = np.full(n, cfg.V_REFERENCE)
 
-        if i > 0:
-            psi[i] = psi[i - 1] + kappa[i - 1] * (s_arr[i] - s_arr[i - 1])
-            x[i] = x[i - 1] + np.cos(psi[i - 1]) * (s_arr[i] - s_arr[i - 1])
-            y[i] = y[i - 1] + np.sin(psi[i - 1]) * (s_arr[i] - s_arr[i - 1])
+    # Vectorized Frenet integration via cumulative sum
+    ds_arr = np.diff(s_arr, prepend=0.0)
+    psi = np.cumsum(kappa * ds_arr)
+    psi[0] = 0.0  # Initial heading
+
+    x = np.cumsum(np.cos(psi) * ds_arr)
+    x[0] = 0.0
+    y = np.cumsum(np.sin(psi) * ds_arr)
+    y[0] = 0.0
 
     return RoadProfile(
         scenario_id="",
@@ -179,24 +210,40 @@ def build_scn02() -> RoadProfile:
     """
     SCN-02: Constant Radius Curve — ISO 15622:2018 §8.2
 
-    Geometry: 150m straight → 200m arc at R=80m → 150m straight.
+    Geometry: 150m straight → 20m clothoid entry → 160m arc at R=80m →
+              20m clothoid exit → 150m straight.
     Total: 500 m.
 
     R = 80 m is the minimum curve radius for 60 km/h per AASHTO Green Book §3-4.
-    This tests steady-state lateral error tracking under constant curvature.
+    Clothoid transitions (20m linear curvature ramp) prevent discontinuous
+    curvature steps that cause unphysical transient overshoot.
     """
     L_straight1 = 150.0
-    L_arc = 200.0
+    L_clothoid = 20.0       # m — clothoid transition zone
+    L_arc = 160.0            # m — reduced from 200 to keep total at 500
     L_straight2 = 150.0
-    R = 80.0  # m — AASHTO minimum at 60 km/h
+    R = 80.0                 # m — AASHTO minimum at 60 km/h
     kappa_curve = 1.0 / R
-    total_length = L_straight1 + L_arc + L_straight2
+    total_length = L_straight1 + L_clothoid + L_arc + L_clothoid + L_straight2
+
+    s1 = L_straight1
+    s2 = s1 + L_clothoid         # end of entry clothoid
+    s3 = s2 + L_arc              # end of constant curve
+    s4 = s3 + L_clothoid         # end of exit clothoid
 
     def kappa_fn(s: float) -> float:
-        if s < L_straight1:
+        if s < s1:
             return 0.0
-        elif s < L_straight1 + L_arc:
+        elif s < s2:
+            # Entry clothoid: linear ramp 0 → kappa_curve
+            frac = (s - s1) / L_clothoid
+            return kappa_curve * frac
+        elif s < s3:
             return kappa_curve
+        elif s < s4:
+            # Exit clothoid: linear ramp kappa_curve → 0
+            frac = (s - s3) / L_clothoid
+            return kappa_curve * (1.0 - frac)
         else:
             return 0.0
 
@@ -302,8 +349,13 @@ def build_scn04() -> RoadProfile:
             psi[i] = 0.0
             kappa[i] = 0.0
 
-        # x is approximately s for small heading angles
-        x[i] = s
+        # Proper x integration: x[i] = x[i-1] + cos(psi[i-1]) * ds
+        # (x ≈ s approximation breaks at 12° heading during lane change)
+        if i == 0:
+            x[i] = 0.0
+        else:
+            ds_step = s_arr[i] - s_arr[i - 1]
+            x[i] = x[i - 1] + np.cos(psi[i - 1]) * ds_step
 
     speed_profile = np.full(n, cfg.V_REFERENCE)
 
@@ -343,19 +395,55 @@ def build_scn05() -> RoadProfile:
     V_HIGH = 50.0 / 3.6    # 13.89 m/s
     V_LOW = 30.0 / 3.6     # 8.33 m/s
 
+    # Clothoid transition length for smoother curvature changes
+    L_cloth = 10.0  # m — linear curvature ramp at transitions
+
     def kappa_fn(s: float) -> float:
-        if s < seg_cumulative[1]:
+        kappa_c1 = 1.0 / R_curve1   # 0.01667
+        kappa_sb = 1.0 / R_sbend    # 0.025
+
+        # Segment 1: Straight (0 → seg_cumulative[1])
+        if s < seg_cumulative[1] - L_cloth:
             return 0.0
+        elif s < seg_cumulative[1]:
+            # Entry clothoid into curve1
+            frac = (s - (seg_cumulative[1] - L_cloth)) / L_cloth
+            return kappa_c1 * frac
+
+        # Segment 2: Curve R=60m (seg_cumulative[1] → seg_cumulative[2])
+        elif s < seg_cumulative[2] - L_cloth:
+            return kappa_c1
         elif s < seg_cumulative[2]:
-            return 1.0 / R_curve1
-        elif s < seg_cumulative[3]:
+            # Exit clothoid from curve1
+            frac = (s - (seg_cumulative[2] - L_cloth)) / L_cloth
+            return kappa_c1 * (1.0 - frac)
+
+        # Segment 3: Straight (seg_cumulative[2] → seg_cumulative[3])
+        elif s < seg_cumulative[3] - L_cloth:
             return 0.0
-        elif s < seg_cumulative[4]:
-            # S-bend first half: positive curvature
-            return 1.0 / R_sbend
+        elif s < seg_cumulative[3]:
+            # Entry clothoid into S-bend positive half
+            frac = (s - (seg_cumulative[3] - L_cloth)) / L_cloth
+            return kappa_sb * frac
+
+        # Segment 4: S-bend first half +κ (seg_cumulative[3] → seg_cumulative[4])
+        elif s < seg_cumulative[4] - L_cloth:
+            return kappa_sb
+        elif s < seg_cumulative[4] + L_cloth:
+            # S-bend reversal: linear transition +κ → −κ over 2*L_cloth
+            s_mid = seg_cumulative[4]
+            frac = (s - (s_mid - L_cloth)) / (2.0 * L_cloth)
+            return kappa_sb * (1.0 - 2.0 * frac)
+
+        # Segment 5: S-bend second half −κ (seg_cumulative[4] → seg_cumulative[5])
+        elif s < seg_cumulative[5] - L_cloth:
+            return -kappa_sb
         elif s < seg_cumulative[5]:
-            # S-bend second half: negative curvature
-            return -1.0 / R_sbend
+            # Exit clothoid from S-bend
+            frac = (s - (seg_cumulative[5] - L_cloth)) / L_cloth
+            return -kappa_sb * (1.0 - frac)
+
+        # Segment 6: Exit straight
         else:
             return 0.0
 

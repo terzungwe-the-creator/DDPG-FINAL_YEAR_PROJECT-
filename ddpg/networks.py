@@ -67,13 +67,11 @@ class Actor(nn.Module):
         self.act_dim = act_dim
 
         # Hidden layers
-        self.fc1 = nn.Linear(obs_dim, 400)
-        self.ln1 = nn.LayerNorm(400)
-        self.fc2 = nn.Linear(400, 300)
-        self.ln2 = nn.LayerNorm(300)
+        self.fc1 = nn.Linear(obs_dim, 256)
+        self.fc2 = nn.Linear(256, 128)
 
         # Output layer
-        self.fc_out = nn.Linear(300, act_dim)
+        self.fc_out = nn.Linear(128, act_dim)
 
         # Weight initialisation
         _fan_in_init(self.fc1)
@@ -94,8 +92,8 @@ class Actor(nn.Module):
         Returns:
             Action tensor in [-1, 1], shape (batch, act_dim).
         """
-        x = torch.relu(self.ln1(self.fc1(obs)))
-        x = torch.relu(self.ln2(self.fc2(x)))
+        x = torch.relu(self.fc1(obs))
+        x = torch.relu(self.fc2(x))
         x = torch.tanh(self.fc_out(x))
         return x
 
@@ -121,13 +119,11 @@ class Critic(nn.Module):
         input_dim = obs_dim + act_dim  # 8 + 1 = 9
 
         # Hidden layers
-        self.fc1 = nn.Linear(input_dim, 400)
-        self.ln1 = nn.LayerNorm(400)
-        self.fc2 = nn.Linear(400, 300)
-        self.ln2 = nn.LayerNorm(300)
+        self.fc1 = nn.Linear(input_dim, 256)
+        self.fc2 = nn.Linear(256, 128)
 
         # Output layer
-        self.fc_out = nn.Linear(300, 1)
+        self.fc_out = nn.Linear(128, 1)
 
         # Weight initialisation
         _fan_in_init(self.fc1)
@@ -149,7 +145,7 @@ class Critic(nn.Module):
             Q-value tensor, shape (batch, 1).
         """
         x = torch.cat([obs, action], dim=-1)
-        x = torch.relu(self.ln1(self.fc1(x)))
-        x = torch.relu(self.ln2(self.fc2(x)))
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
         q = self.fc_out(x)
         return q

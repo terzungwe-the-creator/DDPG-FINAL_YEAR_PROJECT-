@@ -83,6 +83,7 @@ REWARD_W_LATERAL: float = 5.0    # Dominant: lane keeping is the primary control
 REWARD_W_HEADING: float = 2.0    # Secondary: heading alignment for curve tracking
 REWARD_W_SMOOTH: float = 1.0     # Moderate: penalise jerky steering without drowning lateral
 REWARD_W_PROGRESS: float = 0.3   # Small: prevents zero-speed policy collapse
+REWARD_W_BOUNDARY: float = 2.0   # Boundary proximity penalty weight (§3.5 code review)
 REWARD_TERMINAL_PENALTY: float = -10.0  # Lane departure penalty
 
 # Departure threshold for terminal condition
@@ -131,7 +132,14 @@ TAU: float = 0.005                   # Polyak averaging coefficient
 BATCH_SIZE: int = 256                # Mini-batch size
 POLICY_UPDATE_FREQ: int = 2          # Delayed policy update (TD3-style)
 CRITIC_GRAD_CLIP: float = 1.0        # Gradient clipping on critic
+ACTOR_GRAD_CLIP: float = 0.5         # Gradient clipping on actor (prevents policy collapse)
 WARMUP_STEPS: int = 5000             # Reduced from 20K: buffer pre-populated with real data
+UPDATES_PER_STEP: int = 1            # Gradient steps per environment step (UTD ratio)
+
+# Sim-only mode overrides (activated when all datasets are skipped)
+SIM_ONLY_WARMUP_STEPS: int = 10_000  # More random exploration needed without expert data
+SIM_ONLY_UPDATES_PER_STEP: int = 2   # Higher UTD ratio compensates for no preloaded data
+SIM_ONLY_NOISE_SIGMA_INIT: float = 0.20  # More exploration noise without expert guidance
 
 # Total buffer capacity across all sub-buffers
 BUFFER_CAPACITY: int = 2_000_000     # 2M: holds ~1M real + ~600K sim
@@ -149,11 +157,16 @@ BUFFER_CAPACITIES: Dict[str, int] = {
 # §8 — NOISE SCHEDULE (Ornstein-Uhlenbeck with annealing)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-NOISE_SIGMA_INIT: float = 0.15      # Initial exploration noise (reduced vs sim-only)
+NOISE_SIGMA_INIT: float = 0.15      # Initial exploration noise (with expert data)
 NOISE_SIGMA_FINAL: float = 0.03     # Final exploitation noise
 NOISE_THETA: float = 0.15           # OU mean reversion rate
 NOISE_ANNEAL_START: int = 50         # Episode when annealing begins (earlier for FF+FB)
 NOISE_ANNEAL_END: int = 400          # Episode when annealing completes
+
+# Feedforward preview time (s) — lookahead for anticipatory steering
+PREVIEW_TIME: float = 0.8            # 0.8s at 16.67 m/s = 13.3m preview (matched to yaw lag)
+CORRECTION_AUTHORITY: float = 0.15    # Fraction of DELTA_MAX for agent corrections
+ACTION_SMOOTHING_ALPHA: float = 0.15  # Low-pass filter coefficient for action smoothing
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -178,7 +191,7 @@ PHASE2_END: int = 300
 # §10 — TRAINING PARAMETERS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-N_EPISODES: int = 600                # Total training episodes
+N_EPISODES: int = 1000                # Total training episodes (1000 for 5-scene diversity)
 CHECKPOINT_INTERVAL: int = 50        # Save model every N episodes
 CONVERGENCE_WINDOW: int = 50         # Rolling window for convergence check
 
@@ -222,10 +235,10 @@ PRETRAIN_GRADIENT_STEPS: int = 1000
 SCENARIO_IDS: List[str] = ["SCN-01", "SCN-02", "SCN-03", "SCN-04", "SCN-05"]
 
 CURRICULUM_PHASES: Dict[str, Dict] = {
-    "phase1": {"episodes": (0, 50), "scenarios": ["SCN-01"]},
-    "phase2": {"episodes": (50, 150), "scenarios": ["SCN-01", "SCN-02"]},
-    "phase3": {"episodes": (150, 300), "scenarios": ["SCN-01", "SCN-02", "SCN-03"]},
-    "phase4": {"episodes": (300, 600), "scenarios": SCENARIO_IDS},
+    "phase1": {"episodes": (0, 100), "scenarios": ["SCN-01"]},
+    "phase2": {"episodes": (100, 250), "scenarios": ["SCN-01", "SCN-02"]},
+    "phase3": {"episodes": (250, 500), "scenarios": ["SCN-01", "SCN-02", "SCN-03"]},
+    "phase4": {"episodes": (500, 1000), "scenarios": SCENARIO_IDS},
 }
 
 
@@ -287,6 +300,31 @@ PLOT_STYLE: Dict = {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 SEED: int = 42
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# §16b — REAL-WORLD DEPLOYMENT CONFIGURATION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Control loop frequency (Hz) — must match vehicle CAN bus rate
+DEPLOY_CONTROL_HZ: int = 50          # 50 Hz control loop (20 ms period)
+DEPLOY_SENSOR_TIMEOUT_S: float = 0.1 # Max age of sensor data before emergency stop
+DEPLOY_MAX_STEERING_RATE: float = 2.5  # rad/s — actuator rate limit
+DEPLOY_MIN_SPEED_MPS: float = 5.0    # m/s — minimum speed for LKA engagement
+DEPLOY_MAX_SPEED_MPS: float = 36.0   # m/s — 130 km/h max speed for LKA
+DEPLOY_EMERGENCY_LATERAL_M: float = 1.5  # Emergency stop if |e_lat| exceeds this
+DEPLOY_HANDOFF_LATERAL_M: float = 1.0    # Driver handoff warning threshold
+DEPLOY_HEARTBEAT_TIMEOUT_S: float = 0.5  # Watchdog timeout for actuator comms
+
+# Sensor fusion weights
+DEPLOY_CAMERA_WEIGHT: float = 0.6    # Camera lane detection weight
+DEPLOY_LIDAR_WEIGHT: float = 0.25    # LiDAR lane detection weight
+DEPLOY_MAP_WEIGHT: float = 0.15      # HD map prior weight
+
+# Supported hardware interfaces
+DEPLOY_CAN_INTERFACE: str = "socketcan"  # CAN bus interface type
+DEPLOY_CAN_CHANNEL: str = "can0"         # CAN channel name
+DEPLOY_CAN_BITRATE: int = 500000         # CAN bus bitrate
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

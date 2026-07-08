@@ -38,7 +38,8 @@ class RandomizedParams:
     C_ar: float = cfg.TYRE_CAR_NOMINAL
     friction_mu: float = 1.0
     wind_force_n: float = 0.0
-    obs_latency_steps: int = 0
+    bank_angle_rad: float = 0.0
+    camera_bias_m: float = 0.0
 
 
 class DomainRandomizer:
@@ -110,10 +111,11 @@ class DomainRandomizer:
         # Lateral wind disturbance force (constant per episode)
         wind_force_n = np.random.normal(0.0, self.wind_std)
 
-        # Observation latency: 0–3 steps (0–30 ms at 100 Hz)
-        obs_latency = np.random.randint(
-            self.latency_range[0], self.latency_range[1] + 1
-        )
+        # Bank angle (camber): ±5 degrees
+        bank_angle_rad = np.random.uniform(-5.0, 5.0) * np.pi / 180.0
+
+        # Camera bias: ±0.1 meters
+        camera_bias_m = np.random.uniform(-0.1, 0.1)
 
         self._current_params = RandomizedParams(
             mass_kg=mass_kg,
@@ -121,7 +123,8 @@ class DomainRandomizer:
             C_ar=C_ar,
             friction_mu=friction_mu,
             wind_force_n=wind_force_n,
-            obs_latency_steps=obs_latency,
+            bank_angle_rad=bank_angle_rad,
+            camera_bias_m=camera_bias_m,
         )
 
         # Reset observation delay buffer
@@ -132,15 +135,20 @@ class DomainRandomizer:
     def apply_obs_latency(self, obs: np.ndarray) -> np.ndarray:
         """
         Apply observation latency by buffering observations.
+        Uses stochastic per-step jitter.
 
         Args:
             obs: Current true observation.
 
         Returns:
-            Delayed observation (or current if latency=0).
+            Delayed observation.
         """
-        latency = self._current_params.obs_latency_steps
-        if latency == 0 or not self.enabled:
+        if not self.enabled:
+            return obs
+
+        # Sample latency stochastically every step (simulates jitter)
+        latency = np.random.randint(self.latency_range[0], self.latency_range[1] + 1)
+        if latency == 0:
             return obs
 
         self._obs_buffer.append(obs.copy())
@@ -177,5 +185,6 @@ class DomainRandomizer:
             "dr_C_ar": p.C_ar,
             "dr_friction_mu": p.friction_mu,
             "dr_wind_force_n": p.wind_force_n,
-            "dr_obs_latency_steps": p.obs_latency_steps,
+            "dr_bank_angle_rad": p.bank_angle_rad,
+            "dr_camera_bias_m": p.camera_bias_m,
         }

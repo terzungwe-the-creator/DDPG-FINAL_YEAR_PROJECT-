@@ -1,23 +1,43 @@
-# Model checkpoints (560+ MB of .pt files)
-results/checkpoints/
-*.pt
+# ── Virtual Environment (DO NOT COMMIT — 40K+ files, ~2GB) ──
+.venv/
+venv/
+env/
 
-# Training outputs (regenerable)
-results/training_log.csv
-results/system.log
-results/cache/
-
-# Python cache
+# ── Python cache ──
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 
-# Generated figures (regenerable)
+# ── Training outputs (regenerated during training) ──
+results/checkpoints/
+results/training_log.csv
+results/system.log
+results/cache/
 results/figures/
+*.pt
 
-# Large documents
+# ── Evaluation outputs (regenerated during eval) ──
+results/eval_raw.csv
+results/eval_summary.csv
+results/performance_report.json
+results/dataset_preload_stats.json
+
+# ── Large documents ──
 *.docx
 *.pdf
 
-# Diagnostic/scratch scripts
+# ── Diagnostic/scratch scripts ──
 diag_*.py
+
+# ── IDE/Editor ──
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── OS files ──
+.DS_Store
+Thumbs.db
+desktop.ini

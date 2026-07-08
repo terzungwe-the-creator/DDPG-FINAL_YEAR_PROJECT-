@@ -7,12 +7,15 @@ Orchestrates the complete pipeline:
     3. DDPG training (600 episodes, curriculum-based)
     4. Deterministic evaluation (100 episodes, 5 scenarios)
     5. Publication-quality figure generation (8 PNGs)
+    6. Real-world deployment (50 Hz control loop)
 
 Usage:
     python main.py --all                   # Full pipeline
     python main.py --train                 # Training only
     python main.py --eval                  # Evaluation only (requires checkpoint)
     python main.py --plot                  # Plot from existing results
+    python main.py --deploy                # Deploy on real/simulated vehicle
+    python main.py --deploy --simulated    # Simulated deployment (no hardware)
     python main.py --all --skip-ds01       # Skip OpenLKA dataset
     python main.py --all --skip-ds02       # Skip comma-steering dataset
     python main.py --all --skip-ds03       # Skip Argoverse 2 dataset
@@ -21,7 +24,7 @@ Standards:
     ISO 15622:2018, IEEE 2846-2022, UNECE WP.29 R157,
     ISO 3888-2:2011, ISO 26262:2018 ASIL-B
 
-Version: 3.0 — Dataset-Augmented Training
+Version: 3.0 — Dataset-Augmented Training + Real-World Deployment
 """
 
 from __future__ import annotations
@@ -107,6 +110,10 @@ def parse_args() -> argparse.Namespace:
         "--plot", action="store_true",
         help="Generate figures from existing results files",
     )
+    stage_group.add_argument(
+        "--deploy", action="store_true",
+        help="Deploy trained agent on real or simulated vehicle",
+    )
 
     # Dataset controls
     ds_group = parser.add_argument_group("Dataset controls")
@@ -161,13 +168,29 @@ def parse_args() -> argparse.Namespace:
         help="Enable debug-level logging",
     )
 
+    # Deployment controls
+    deploy_group = parser.add_argument_group("Deployment controls")
+    deploy_group.add_argument(
+        "--simulated", action="store_true",
+        help="Use simulated sensors/actuators for deployment testing",
+    )
+    deploy_group.add_argument(
+        "--deploy-scenario", type=str, default="SCN-01",
+        choices=["SCN-01", "SCN-02", "SCN-03", "SCN-04", "SCN-05"],
+        help="Scenario for simulated deployment (default: SCN-01)",
+    )
+    deploy_group.add_argument(
+        "--deploy-steps", type=int, default=5000,
+        help="Maximum steps for deployment run (default: 5000)",
+    )
+
     args = parser.parse_args()
 
     # Validate: at least one stage must be selected
-    if not any([args.all, args.train, args.eval, args.plot]):
+    if not any([args.all, args.train, args.eval, args.plot, args.deploy]):
         parser.print_help()
         print("\nError: Please specify at least one pipeline stage "
-              "(--all, --train, --eval, --plot)")
+              "(--all, --train, --eval, --plot, --deploy)")
         sys.exit(1)
 
     return args
@@ -314,6 +337,51 @@ def run_plotting(args: argparse.Namespace) -> None:
     logger.info(f"Figures saved to {cfg.FIGURES_DIR}")
 
 
+def run_deployment(args: argparse.Namespace) -> dict:
+    """Execute real-world or simulated deployment."""
+    logger = logging.getLogger("main.deploy")
+    logger.info("=" * 70)
+    logger.info("DDPG-LKA v3.0 — DEPLOYMENT PIPELINE")
+    logger.info("=" * 70)
+
+    # Find checkpoint
+    if args.checkpoint:
+        ckpt_path = Path(args.checkpoint)
+    else:
+        ckpt_path = find_latest_checkpoint()
+
+    logger.info(f"Checkpoint: {ckpt_path}")
+
+    if args.simulated or True:  # Default to simulated until hardware is connected
+        logger.info("Mode: SIMULATED DEPLOYMENT")
+        from real_world.deployment_runner import DeploymentRunner
+
+        runner = DeploymentRunner(
+            checkpoint_path=ckpt_path,
+            scenario_id=args.deploy_scenario,
+            max_steps=args.deploy_steps,
+        )
+        result = runner.run()
+    else:
+        logger.info("Mode: REAL HARDWARE DEPLOYMENT")
+        from real_world.hardware_adapters import CANBusSensorInterface, CANBusActuator
+        from real_world.deployment_runner import DeploymentRunner
+
+        sensors = CANBusSensorInterface()
+        actuator = CANBusActuator()
+
+        runner = DeploymentRunner(
+            checkpoint_path=ckpt_path,
+            sensor_interface=sensors,
+            actuator_interface=actuator,
+            max_steps=args.deploy_steps,
+        )
+        result = runner.run()
+
+    logger.info(f"Deployment complete: {result.get('total_steps', 0)} steps")
+    return result
+
+
 def main() -> None:
     """Main entry point."""
     args = parse_args()
@@ -339,6 +407,9 @@ def main() -> None:
 
     if args.all or args.plot:
         run_plotting(args)
+
+    if args.deploy:
+        run_deployment(args)
 
     elapsed = time.time() - start_time
     logger.info(f"Total wall time: {elapsed:.1f}s ({elapsed / 60:.1f} min)")

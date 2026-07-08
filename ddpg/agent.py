@@ -68,21 +68,28 @@ class DDPGAgent:
 
         # Online networks
         self.actor = Actor(obs_dim, act_dim).to(self.device)
-        self.critic = Critic(obs_dim, act_dim).to(self.device)
+        self.critic1 = Critic(obs_dim, act_dim).to(self.device)
+        self.critic2 = Critic(obs_dim, act_dim).to(self.device)
 
         # Target networks (deep copy, no grad)
         self.actor_target = copy.deepcopy(self.actor).to(self.device)
-        self.critic_target = copy.deepcopy(self.critic).to(self.device)
+        self.critic1_target = copy.deepcopy(self.critic1).to(self.device)
+        self.critic2_target = copy.deepcopy(self.critic2).to(self.device)
 
         # Freeze target network parameters
         for p in self.actor_target.parameters():
             p.requires_grad = False
-        for p in self.critic_target.parameters():
+        for p in self.critic1_target.parameters():
+            p.requires_grad = False
+        for p in self.critic2_target.parameters():
             p.requires_grad = False
 
         # Optimisers
         self.actor_optim = optim.Adam(self.actor.parameters(), lr=actor_lr)
-        self.critic_optim = optim.Adam(self.critic.parameters(), lr=critic_lr)
+        self.critic_optim = optim.Adam(
+            list(self.critic1.parameters()) + list(self.critic2.parameters()), 
+            lr=critic_lr
+        )
 
         # Update counter for delayed policy updates
         self.update_count: int = 0
@@ -134,33 +141,49 @@ class DDPGAgent:
             return {"critic_loss": 0.0, "actor_loss": 0.0, "q_mean": 0.0, "q_std": 0.0}
 
         # 1. Sample batch
-        states, actions, rewards, next_states, dones = buffer.sample(
+        states, actions, rewards, next_states, dones, sources, indices, is_weights = buffer.sample(
             cfg.BATCH_SIZE, episode
         )
 
         # 2. Compute critic target
         with torch.no_grad():
             next_actions = self.actor_target(next_states)
-            q_target_next = self.critic_target(next_states, next_actions)
+            
+            # Target policy smoothing
+            noise = torch.randn_like(next_actions) * 0.2
+            noise = noise.clamp(-0.5, 0.5)
+            next_actions = (next_actions + noise).clamp(-1.0, 1.0)
+            
+            q1_target = self.critic1_target(next_states, next_actions)
+            q2_target = self.critic2_target(next_states, next_actions)
+            q_target_next = torch.min(q1_target, q2_target)
             y = rewards + self.gamma * (1.0 - dones) * q_target_next
 
         # 3. Update critic
-        q_current = self.critic(states, actions)
-        critic_loss = nn.functional.mse_loss(q_current, y)
+        q1_current = self.critic1(states, actions)
+        q2_current = self.critic2(states, actions)
+        
+        td_error1 = q1_current - y
+        td_error2 = q2_current - y
+        
+        critic_loss = (is_weights * (td_error1 ** 2 + td_error2 ** 2)).mean()
 
         self.critic_optim.zero_grad()
         critic_loss.backward()
 
         # Gradient clipping on critic
-        nn.utils.clip_grad_norm_(
-            self.critic.parameters(), self.critic_grad_clip
-        )
+        nn.utils.clip_grad_norm_(self.critic1.parameters(), self.critic_grad_clip)
+        nn.utils.clip_grad_norm_(self.critic2.parameters(), self.critic_grad_clip)
         self.critic_optim.step()
+        
+        # Update buffer priorities using absolute TD error from critic1
+        td_errors_np = td_error1.detach().cpu().numpy()
+        buffer.update_priorities(sources, indices, td_errors_np)
 
         self.update_count += 1
 
         # Metrics
-        q_vals = q_current.detach()
+        q_vals = q1_current.detach()
         metrics = {
             "critic_loss": float(critic_loss.item()),
             "actor_loss": 0.0,
@@ -172,17 +195,28 @@ class DDPGAgent:
         if self.update_count % self.policy_update_freq == 0:
             # Maximise Q(s, μ(s))
             predicted_actions = self.actor(states)
-            actor_loss = -self.critic(states, predicted_actions).mean()
+            
+            # L2 Action Regularisation
+            l2_weight = 0.01
+            l2_penalty = l2_weight * (predicted_actions ** 2).mean()
+            
+            actor_loss = -self.critic1(states, predicted_actions).mean() + l2_penalty
 
             self.actor_optim.zero_grad()
             actor_loss.backward()
+
+            # Gradient clipping on actor (prevents policy collapse from noisy Q)
+            nn.utils.clip_grad_norm_(
+                self.actor.parameters(), cfg.ACTOR_GRAD_CLIP
+            )
             self.actor_optim.step()
 
             metrics["actor_loss"] = float(actor_loss.item())
 
             # 5. Soft-update target networks
             self._soft_update(self.actor, self.actor_target)
-            self._soft_update(self.critic, self.critic_target)
+            self._soft_update(self.critic1, self.critic1_target)
+            self._soft_update(self.critic2, self.critic2_target)
 
         return metrics
 
@@ -204,17 +238,6 @@ class DDPGAgent:
             )
 
     def save_checkpoint(self, episode: int, path: Optional[Path] = None, suffix: str = "") -> Path:
-        """
-        Save actor, critic, and optimiser states.
-
-        Args:
-            episode: Current episode number (used in filename).
-            path:    Directory to save to. Default: CHECKPOINTS_DIR.
-            suffix:  Optional suffix for the filename (e.g. '_best').
-
-        Returns:
-            Path to saved checkpoint file.
-        """
         if path is None:
             path = cfg.CHECKPOINTS_DIR
         path.mkdir(parents=True, exist_ok=True)
@@ -224,9 +247,11 @@ class DDPGAgent:
             {
                 "episode": episode,
                 "actor_state_dict": self.actor.state_dict(),
-                "critic_state_dict": self.critic.state_dict(),
+                "critic1_state_dict": self.critic1.state_dict(),
+                "critic2_state_dict": self.critic2.state_dict(),
                 "actor_target_state_dict": self.actor_target.state_dict(),
-                "critic_target_state_dict": self.critic_target.state_dict(),
+                "critic1_target_state_dict": self.critic1_target.state_dict(),
+                "critic2_target_state_dict": self.critic2_target.state_dict(),
                 "actor_optim_state_dict": self.actor_optim.state_dict(),
                 "critic_optim_state_dict": self.critic_optim.state_dict(),
                 "update_count": self.update_count,
@@ -236,21 +261,14 @@ class DDPGAgent:
         return filepath
 
     def load_checkpoint(self, filepath: Path) -> int:
-        """
-        Load actor, critic, and optimiser states from a checkpoint.
-
-        Args:
-            filepath: Path to checkpoint .pt file.
-
-        Returns:
-            Episode number from the checkpoint.
-        """
         checkpoint = torch.load(filepath, map_location=self.device, weights_only=False)
 
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
-        self.critic.load_state_dict(checkpoint["critic_state_dict"])
+        self.critic1.load_state_dict(checkpoint["critic1_state_dict"])
+        self.critic2.load_state_dict(checkpoint["critic2_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
-        self.critic_target.load_state_dict(checkpoint["critic_target_state_dict"])
+        self.critic1_target.load_state_dict(checkpoint["critic1_target_state_dict"])
+        self.critic2_target.load_state_dict(checkpoint["critic2_target_state_dict"])
         self.actor_optim.load_state_dict(checkpoint["actor_optim_state_dict"])
         self.critic_optim.load_state_dict(checkpoint["critic_optim_state_dict"])
         self.update_count = checkpoint["update_count"]

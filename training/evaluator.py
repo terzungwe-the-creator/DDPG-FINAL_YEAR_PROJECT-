@@ -173,8 +173,21 @@ class Evaluator:
                     ep_xs.append(info["X"])
                     ep_ys.append(info["Y"])
 
-                    # Compute TTLD for this timestep (logged inline)
+                    # Compute incremental TTLD for this timestep
                     delta_dot = info.get("delta_dot", 0.0)
+                    if len(ep_e_lat) >= 2:
+                        e_lat_now = ep_e_lat[-1]
+                        e_lat_prev = ep_e_lat[-2]
+                        e_lat_dot = (e_lat_now - e_lat_prev) / cfg.SIM_DT
+                        margin = cfg.ISO15622_DEPARTURE_THR - abs(e_lat_now)
+                        if margin <= 0:
+                            ttld_val = 0.0
+                        elif (e_lat_now >= 0 and e_lat_dot > 0) or (e_lat_now < 0 and e_lat_dot < 0):
+                            ttld_val = min(margin / max(abs(e_lat_dot), 1e-6), 999.0)
+                        else:
+                            ttld_val = 999.0
+                    else:
+                        ttld_val = 999.0
 
                     # Log per-timestep to raw CSV
                     self.eval_logger.log_timestep(
@@ -190,7 +203,7 @@ class Evaluator:
                         v_y=info["v_y"],
                         r=info["r"],
                         reward=reward,
-                        ttld_s=0.0,  # Computed post-hoc below
+                        ttld_s=ttld_val,
                     )
 
                     state = next_state
