@@ -16,7 +16,7 @@ Optimisations:
   - Early stopping convergence detection
 """
 from __future__ import annotations
-import csv, json, logging, sys, time
+import csv, json, logging, math, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
@@ -130,7 +130,22 @@ class Env:
             obs[0] += self.difficulty_scale * self.dr.params.camera_bias_m / cfg.NORM_E_LAT
             if self.difficulty_scale > 0.5 and np.random.rand() < (0.01 * self.difficulty_scale):
                 obs[0] = 0.0; obs[1] = 0.0
-            obs += np.random.normal(0, 0.02 * self.difficulty_scale, obs.shape).astype(np.float32)
+            # Component 4: Per-channel curvature-proportional noise
+            # Higher noise on curvature-related channels when curvature is high
+            # Forces agent to not over-rely on lookahead on curves
+            base_noise = 0.02 * self.difficulty_scale
+            kappa_noise_scale = 1.0 + 3.0 * min(abs(k) / 0.02, 2.0)  # Up to 7x on tight curves
+            per_channel_std = np.array([
+                base_noise,                          # e_lat
+                base_noise * 0.5,                    # e_psi
+                base_noise * kappa_noise_scale,      # kappa_ref
+                base_noise,                          # v_y
+                base_noise,                          # yaw_rate
+                base_noise * 0.3,                    # delta_prev (less noise on own state)
+                base_noise * kappa_noise_scale,      # kappa_la1 (curvature-proportional)
+                base_noise * kappa_noise_scale,      # kappa_la2 (curvature-proportional)
+            ], dtype=np.float32)
+            obs += np.random.normal(0, 1, obs.shape).astype(np.float32) * per_channel_std
             if self.difficulty_scale > 0.2:
                 obs = self.dr.apply_obs_latency(obs)
         return np.clip(obs, -1, 1)
@@ -159,22 +174,27 @@ def metrics(data):
         "settling_time_s": st, "overshoot_pct": float(np.max(np.abs(el))/cfg.LANE_WIDTH_HALF*100),
         "ttld_mean": 999.0, "episode_steps": len(data), "lane_departure_flag": int(dep)}
 
-# ── Round-Robin Curriculum with Failure Oversampling ──────────────────────────
-# Replaces AdaptiveCurriculum which locked training to SCN-01 for 300+ episodes.
+# ── RMSE-Weighted Exponential Curriculum ──────────────────────────────────────
+# Component 3: Aggressive RMSE-weighted curriculum with scene score tracking.
+# Uses exponential oversampling based on per-scene rolling RMSE, not just pass/fail.
+# Guarantees minimum 10% sampling for every scene to prevent starvation.
 
-class RoundRobinCurriculum:
-    """Cycle through all scenarios from early training, with failure oversampling."""
+class RMSEWeightedCurriculum:
+    """Sample scenarios proportional to exp(scene_rmse), with min 10% floor."""
 
     SCENARIOS = ["SCN-01", "SCN-02", "SCN-03", "SCN-04", "SCN-05"]
 
-    def __init__(self, warmup_episodes=20):
+    def __init__(self, warmup_episodes=10, rmse_window=20):
         self.warmup_episodes = warmup_episodes
+        self.rmse_window = rmse_window
+        # Track per-scene RMSE history for exponential weighting
+        self.scene_rmse_history = {s: [] for s in self.SCENARIOS}
         self.fail_counts = {s: 0 for s in self.SCENARIOS}
         self.pass_counts = {s: 0 for s in self.SCENARIOS}
         self.scenario_pool = self.SCENARIOS[:2]
 
     def sample_scenario(self, episode: int) -> str:
-        """Sample scenario with failure-weighted probability (4x oversample failures)."""
+        """Sample scenario with RMSE-exponential probability."""
         if episode < self.warmup_episodes:
             pool = self.SCENARIOS[:2]
         else:
@@ -183,20 +203,31 @@ class RoundRobinCurriculum:
 
         weights = []
         for scn in pool:
-            total = self.pass_counts[scn] + self.fail_counts[scn]
-            if total == 0:
-                weights.append(5.0)  # High priority for unseen scenes
+            history = self.scene_rmse_history[scn]
+            if len(history) == 0:
+                weights.append(10.0)  # Very high priority for unseen scenes
             else:
-                pass_rate = self.pass_counts[scn] / total
-                weights.append(1.0 + 4.0 * (1.0 - pass_rate))  # 4x failure oversampling
-        weights = np.array(weights) / sum(weights)
+                recent_rmse = np.mean(history[-self.rmse_window:])
+                # Exponential oversampling: scenes with high RMSE get sampled much more
+                weights.append(max(np.exp(recent_rmse * 5.0), 0.5))
+
+        weights = np.array(weights)
+        # Enforce minimum 10% floor per scene to prevent starvation
+        min_weight = 0.10 * len(pool)
+        weights = np.maximum(weights, min_weight / len(pool) * weights.sum())
+        weights /= weights.sum()
         return np.random.choice(pool, p=weights)
 
-    def update(self, scenario_id: str, passed: bool):
+    def update(self, scenario_id: str, passed: bool, rmse: float = 0.0):
+        """Update with both pass/fail and RMSE for richer weighting."""
         if passed:
             self.pass_counts[scenario_id] += 1
         else:
             self.fail_counts[scenario_id] += 1
+        self.scene_rmse_history[scenario_id].append(rmse)
+        # Keep bounded
+        if len(self.scene_rmse_history[scenario_id]) > 100:
+            self.scene_rmse_history[scenario_id] = self.scene_rmse_history[scenario_id][-50:]
 
 # ── TRAINING ──────────────────────────────────────────────────────────────────
 
@@ -219,10 +250,12 @@ def train():
     agent = DDPGAgent(device=device)
     buf = HybridStratifiedBuffer(device=device)
     noise = OUNoise(sigma=cfg.SIM_ONLY_NOISE_SIGMA_INIT)
-    curriculum = RoundRobinCurriculum(warmup_episodes=20)
+    curriculum = RMSEWeightedCurriculum(warmup_episodes=10)
 
     best_agent_state = None
     best_score = -1.0
+    best_scene_lksrs = {s: 0.0 for s in cfg.SCENARIO_IDS}  # Track per-scene best LKSR
+    actor_freeze_until = -1  # Component 7: Actor freeze episode counter
 
     with open(cfg.PRELOAD_STATS_PATH, "w") as f:
         json.dump({"mode":"sim-only-pytorch", "device": device}, f, indent=2)
@@ -248,10 +281,11 @@ def train():
     try:
         for ep in range(NE):
             scn = curriculum.sample_scenario(ep)
-            phase = "Phase1-Warmup" if ep < 20 else ("Phase2-AllScenes" if ep < 200 else ("Phase3-Refine" if ep < 500 else "Phase4-Polish"))
+            phase = "Phase1-Warmup" if ep < 10 else ("Phase2-AllScenes" if ep < 200 else ("Phase3-Refine" if ep < 500 else "Phase4-Polish"))
 
-            # Gradual difficulty: 0.1→1.0 over 70% of training (learn nominal first)
-            diff_scale = min(1.0, 0.1 + 0.9 * (ep / (0.7 * NE)))
+            # Component 2: Faster difficulty ramp with higher floor
+            # Start DR at 30% from ep 0, reach full by ep 400 (was 10%→full by ep 700)
+            diff_scale = min(1.0, 0.3 + 0.7 * (ep / (0.4 * NE)))
             env.set_difficulty(diff_scale)
             buf.anneal_beta(ep / NE)
 
@@ -277,7 +311,16 @@ def train():
 
                 if total_steps >= WS and buf.has_enough(BS):
                     for _ in range(cfg.SIM_ONLY_UPDATES_PER_STEP):
-                        metrics_dict = agent.update(buf, ep)
+                        # Component 1/7: Actor freeze — only update critic after best model
+                        if ep < actor_freeze_until:
+                            # Temporarily freeze actor to prevent catastrophic forgetting
+                            for p in agent.actor.parameters():
+                                p.requires_grad = False
+                            metrics_dict = agent.update(buf, ep)
+                            for p in agent.actor.parameters():
+                                p.requires_grad = True
+                        else:
+                            metrics_dict = agent.update(buf, ep)
                         cl_list.append(metrics_dict["critic_loss"])
                         al_list.append(metrics_dict["actor_loss"])
                         ql_list.append(metrics_dict["q_mean"])
@@ -287,15 +330,15 @@ def train():
             m = metrics(env.episode_data)
             rh.append(m["total_reward"]); rmh.append(m["rmse_e_lat"]); lh.append(m["lksr_episode"])
             episode_passed = m["lksr_episode"] >= cfg.ISO15622_MIN_LKSR
-            curriculum.update(scn, episode_passed)
+            curriculum.update(scn, episode_passed, rmse=m["rmse_e_lat"])
 
-            # LR decay at 75% and 90% of training
-            if (ep+1) in [int(NE*0.75), int(NE*0.90)]:
-                for pg in agent.actor_optim.param_groups:
-                    pg["lr"] *= 0.5
-                for pg in agent.critic_optim.param_groups:
-                    pg["lr"] *= 0.5
-                logger.info(f"LR decay at ep {ep+1}")
+            # Component 6: Cosine annealing LR (smooth decay, no sudden jumps)
+            lr_scale = 0.5 * (1.0 + math.cos(math.pi * ep / NE))  # 1.0 → 0.0
+            lr_scale = max(lr_scale, 0.05)  # Floor at 5% of initial LR
+            for pg in agent.actor_optim.param_groups:
+                pg["lr"] = cfg.ACTOR_LR * lr_scale
+            for pg in agent.critic_optim.param_groups:
+                pg["lr"] = cfg.CRITIC_LR * lr_scale
 
             row = {"episode":ep,"scenario_id":scn,"phase":phase,**m,
                 "critic_loss_mean": np.mean(cl_list) if cl_list else 0,
@@ -315,15 +358,16 @@ def train():
                     f"Steps:{m['episode_steps']} | diff:{diff_scale:.2f} | sig:{sig:.3f} | {int(time.time()-t0)}s | "
                     f"pool:{curriculum.scenario_pool}")
 
-            # Per-scene mini-evaluation every 100 episodes for best-model selection
-            if (ep+1) >= 100 and (ep+1) % 100 == 0:
+            # Component 5: Robust mini-evaluation every 50 episodes
+            # 10 trials per scene, median-based, with monotonicity guard
+            if (ep+1) >= 50 and (ep+1) % 50 == 0:
                 eval_env = Env(training=False)
                 scene_results = {}
                 for eval_scn in cfg.SCENARIO_IDS:
                     eval_rmses = []
                     eval_lksrs = []
-                    for trial in range(3):
-                        e0 = np.random.uniform(-0.1, 0.1)
+                    for trial in range(10):  # 10 trials (was 3)
+                        e0 = np.random.uniform(-0.15, 0.15)
                         es = eval_env.reset(scn=eval_scn, e_lat_init=e0)
                         ed = False; sc = 0
                         while not ed and sc < cfg.SIM_MAX_STEPS:
@@ -334,8 +378,8 @@ def train():
                         eval_rmses.append(em["rmse_e_lat"])
                         eval_lksrs.append(em["lksr_episode"])
                     scene_results[eval_scn] = {
-                        "rmse": np.mean(eval_rmses),
-                        "lksr": np.mean(eval_lksrs)
+                        "rmse": float(np.median(eval_rmses)),  # Median for robustness
+                        "lksr": float(np.median(eval_lksrs)),
                     }
                 worst_lksr = min(sr["lksr"] for sr in scene_results.values())
                 worst_rmse = max(sr["rmse"] for sr in scene_results.values())
@@ -344,23 +388,44 @@ def train():
                 logger.info(f"  Mini-eval ep {ep+1}: worst_LKSR={worst_lksr:.3f} worst_RMSE={worst_rmse:.4f} score={eval_score:.2f}")
                 for s_id, s_res in scene_results.items():
                     logger.info(f"    {s_id}: RMSE={s_res['rmse']:.4f} LKSR={s_res['lksr']:.3f}")
-                if eval_score > best_score:
+
+                # Component 7: Monotonicity guard — reject if any scene regresses > 0.05 LKSR
+                regression_detected = False
+                if best_score > 0:
+                    for s_id, s_res in scene_results.items():
+                        if best_scene_lksrs.get(s_id, 0) - s_res["lksr"] > 0.05:
+                            regression_detected = True
+                            logger.info(f"  Regression guard: {s_id} LKSR dropped "
+                                        f"{best_scene_lksrs[s_id]:.3f}→{s_res['lksr']:.3f}")
+
+                if eval_score > best_score and not regression_detected:
                     best_score = eval_score
                     best_rmse = worst_rmse
+                    best_scene_lksrs = {s_id: sr["lksr"] for s_id, sr in scene_results.items()}
                     best_agent_state = {
                         "actor": {k: v.cpu().clone() for k, v in agent.actor.state_dict().items()},
                         "critic1": {k: v.cpu().clone() for k, v in agent.critic1.state_dict().items()},
                         "critic2": {k: v.cpu().clone() for k, v in agent.critic2.state_dict().items()},
                     }
                     logger.info(f"  New best model! score={eval_score:.2f}")
+                    # Component 1: Freeze actor for 10 episodes after new best
+                    actor_freeze_until = ep + 10
+                    logger.info(f"  Actor frozen until ep {actor_freeze_until} (critic-only training)")
+                elif regression_detected and best_agent_state is not None:
+                    # Rollback to best model on severe regression
+                    agent.actor.load_state_dict(best_agent_state["actor"])
+                    agent.critic1.load_state_dict(best_agent_state["critic1"])
+                    agent.critic2.load_state_dict(best_agent_state["critic2"])
+                    actor_freeze_until = ep + 15  # Longer freeze after rollback
+                    logger.info(f"  ROLLBACK to best model (score={best_score:.2f}), actor frozen until ep {actor_freeze_until}")
 
-            # Early stopping — tightened for multi-scene convergence
+            # Early stopping — relaxed thresholds for multi-scene convergence
             if len(rmh) >= 200:
                 r100 = np.mean(rmh[-100:])
                 r50 = np.mean(rmh[-50:])
                 l50 = np.mean(lh[-50:])
                 if (abs(r100 - r50) / max(abs(r100), 1e-6) < 0.03
-                    and r50 < 0.08 and l50 > 0.95):
+                    and r50 < 0.12 and l50 > 0.90):
                     logger.info(f"CONVERGED at ep {ep+1}: RMSE={r50:.4f}m LKSR={l50:.3f}")
                     break
 
