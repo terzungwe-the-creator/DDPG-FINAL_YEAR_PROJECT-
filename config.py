@@ -79,12 +79,12 @@ NORM_KAPPA_LA2: float = 0.05                   # 1/m — 2s lookahead curvature
 # Justified against training stability ablations
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-REWARD_W_LATERAL: float = 5.0    # Dominant: lane keeping is the primary control objective
+REWARD_W_LATERAL: float = 8.0    # Dominant: lane keeping is the primary control objective
 REWARD_W_HEADING: float = 2.0    # Secondary: heading alignment for curve tracking
 REWARD_W_SMOOTH: float = 1.0     # Moderate: penalise jerky steering without drowning lateral
 REWARD_W_PROGRESS: float = 0.3   # Small: prevents zero-speed policy collapse
-REWARD_W_BOUNDARY: float = 2.0   # Boundary proximity penalty weight (§3.5 code review)
-REWARD_TERMINAL_PENALTY: float = -10.0  # Lane departure penalty
+REWARD_W_BOUNDARY: float = 3.0   # Boundary proximity penalty weight (§3.5 code review)
+REWARD_TERMINAL_PENALTY: float = -20.0  # Lane departure penalty
 
 # Departure threshold for terminal condition
 DEPARTURE_THRESHOLD: float = LANE_WIDTH_HALF  # 1.75 m — lane boundary
@@ -158,15 +158,15 @@ BUFFER_CAPACITIES: Dict[str, int] = {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 NOISE_SIGMA_INIT: float = 0.15      # Initial exploration noise (with expert data)
-NOISE_SIGMA_FINAL: float = 0.03     # Final exploitation noise
+NOISE_SIGMA_FINAL: float = 0.05     # Final exploitation noise (maintain exploration)
 NOISE_THETA: float = 0.15           # OU mean reversion rate
 NOISE_ANNEAL_START: int = 50         # Episode when annealing begins (earlier for FF+FB)
-NOISE_ANNEAL_END: int = 400          # Episode when annealing completes
+NOISE_ANNEAL_END: int = 700          # Episode when annealing completes (slower for multi-scene)
 
 # Feedforward preview time (s) — lookahead for anticipatory steering
 PREVIEW_TIME: float = 0.8            # 0.8s at 16.67 m/s = 13.3m preview (matched to yaw lag)
-CORRECTION_AUTHORITY: float = 0.25    # Fraction of DELTA_MAX for agent corrections
-ACTION_SMOOTHING_ALPHA: float = 0.15  # Low-pass filter coefficient for action smoothing
+CORRECTION_AUTHORITY: float = 0.50    # Fraction of DELTA_MAX for agent corrections (increased for curves)
+ACTION_SMOOTHING_ALPHA: float = 0.30  # Low-pass filter coefficient for action smoothing (faster response)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

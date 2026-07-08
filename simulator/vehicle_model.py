@@ -267,7 +267,7 @@ class BicycleModel:
         delta_cmd = np.clip(delta_cmd, -cfg.DELTA_MAX, cfg.DELTA_MAX)
 
         # Actuator lag (first order low-pass)
-        tau = 0.1  # 100ms time constant
+        tau = 0.05  # 50ms time constant (modern EPS systems)
         alpha_filter = self.dt / (tau + self.dt)
         self.actual_delta = (1.0 - alpha_filter) * self.actual_delta + alpha_filter * delta_cmd
         

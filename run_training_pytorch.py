@@ -167,14 +167,14 @@ class RoundRobinCurriculum:
 
     SCENARIOS = ["SCN-01", "SCN-02", "SCN-03", "SCN-04", "SCN-05"]
 
-    def __init__(self, warmup_episodes=30):
+    def __init__(self, warmup_episodes=20):
         self.warmup_episodes = warmup_episodes
         self.fail_counts = {s: 0 for s in self.SCENARIOS}
         self.pass_counts = {s: 0 for s in self.SCENARIOS}
         self.scenario_pool = self.SCENARIOS[:2]
 
     def sample_scenario(self, episode: int) -> str:
-        """Sample scenario with failure-weighted probability."""
+        """Sample scenario with failure-weighted probability (4x oversample failures)."""
         if episode < self.warmup_episodes:
             pool = self.SCENARIOS[:2]
         else:
@@ -185,10 +185,10 @@ class RoundRobinCurriculum:
         for scn in pool:
             total = self.pass_counts[scn] + self.fail_counts[scn]
             if total == 0:
-                weights.append(3.0)
+                weights.append(5.0)  # High priority for unseen scenes
             else:
                 pass_rate = self.pass_counts[scn] / total
-                weights.append(1.0 + 2.0 * (1.0 - pass_rate))
+                weights.append(1.0 + 4.0 * (1.0 - pass_rate))  # 4x failure oversampling
         weights = np.array(weights) / sum(weights)
         return np.random.choice(pool, p=weights)
 
@@ -219,7 +219,7 @@ def train():
     agent = DDPGAgent(device=device)
     buf = HybridStratifiedBuffer(device=device)
     noise = OUNoise(sigma=cfg.SIM_ONLY_NOISE_SIGMA_INIT)
-    curriculum = RoundRobinCurriculum(warmup_episodes=30)
+    curriculum = RoundRobinCurriculum(warmup_episodes=20)
 
     best_agent_state = None
     best_score = -1.0
@@ -248,10 +248,10 @@ def train():
     try:
         for ep in range(NE):
             scn = curriculum.sample_scenario(ep)
-            phase = "Phase1-Warmup" if ep < 30 else ("Phase2-AllScenes" if ep < 200 else ("Phase3-Refine" if ep < 500 else "Phase4-Polish"))
+            phase = "Phase1-Warmup" if ep < 20 else ("Phase2-AllScenes" if ep < 200 else ("Phase3-Refine" if ep < 500 else "Phase4-Polish"))
 
-            # Linear difficulty: 0.3→1.0 (always some domain randomization)
-            diff_scale = min(1.0, 0.3 + 0.7 * (ep / (0.5 * NE)))
+            # Gradual difficulty: 0.1→1.0 over 70% of training (learn nominal first)
+            diff_scale = min(1.0, 0.1 + 0.9 * (ep / (0.7 * NE)))
             env.set_difficulty(diff_scale)
             buf.anneal_beta(ep / NE)
 
@@ -315,19 +315,44 @@ def train():
                     f"Steps:{m['episode_steps']} | diff:{diff_scale:.2f} | sig:{sig:.3f} | {int(time.time()-t0)}s | "
                     f"pool:{curriculum.scenario_pool}")
 
-            # Best model tracking (prioritize LKSR for generalization)
-            if len(rmh) >= 50:
-                r50 = np.mean(rmh[-50:])
-                l50 = np.mean(lh[-50:])
-                score = l50 * 10.0 + (1.0 - min(r50, 1.0))
-                if score > best_score:
-                    best_score = score
-                    best_rmse = r50
+            # Per-scene mini-evaluation every 100 episodes for best-model selection
+            if (ep+1) >= 100 and (ep+1) % 100 == 0:
+                eval_env = Env(training=False)
+                scene_results = {}
+                for eval_scn in cfg.SCENARIO_IDS:
+                    eval_rmses = []
+                    eval_lksrs = []
+                    for trial in range(3):
+                        e0 = np.random.uniform(-0.1, 0.1)
+                        es = eval_env.reset(scn=eval_scn, e_lat_init=e0)
+                        ed = False; sc = 0
+                        while not ed and sc < cfg.SIM_MAX_STEPS:
+                            ea = agent.select_action(es, add_noise=False)
+                            es, _, et, etr, _ = eval_env.step(float(ea[0]))
+                            ed = et or etr; sc += 1
+                        em = metrics(eval_env.episode_data)
+                        eval_rmses.append(em["rmse_e_lat"])
+                        eval_lksrs.append(em["lksr_episode"])
+                    scene_results[eval_scn] = {
+                        "rmse": np.mean(eval_rmses),
+                        "lksr": np.mean(eval_lksrs)
+                    }
+                worst_lksr = min(sr["lksr"] for sr in scene_results.values())
+                worst_rmse = max(sr["rmse"] for sr in scene_results.values())
+                # Score: prioritize worst-case scene (minimax)
+                eval_score = worst_lksr * 10.0 + (1.0 - min(worst_rmse, 1.0))
+                logger.info(f"  Mini-eval ep {ep+1}: worst_LKSR={worst_lksr:.3f} worst_RMSE={worst_rmse:.4f} score={eval_score:.2f}")
+                for s_id, s_res in scene_results.items():
+                    logger.info(f"    {s_id}: RMSE={s_res['rmse']:.4f} LKSR={s_res['lksr']:.3f}")
+                if eval_score > best_score:
+                    best_score = eval_score
+                    best_rmse = worst_rmse
                     best_agent_state = {
                         "actor": {k: v.cpu().clone() for k, v in agent.actor.state_dict().items()},
                         "critic1": {k: v.cpu().clone() for k, v in agent.critic1.state_dict().items()},
                         "critic2": {k: v.cpu().clone() for k, v in agent.critic2.state_dict().items()},
                     }
+                    logger.info(f"  New best model! score={eval_score:.2f}")
 
             # Early stopping — tightened for multi-scene convergence
             if len(rmh) >= 200:
