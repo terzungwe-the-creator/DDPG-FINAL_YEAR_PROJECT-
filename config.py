@@ -165,7 +165,7 @@ NOISE_ANNEAL_END: int = 400          # Episode when annealing completes
 
 # Feedforward preview time (s) — lookahead for anticipatory steering
 PREVIEW_TIME: float = 0.8            # 0.8s at 16.67 m/s = 13.3m preview (matched to yaw lag)
-CORRECTION_AUTHORITY: float = 0.15    # Fraction of DELTA_MAX for agent corrections
+CORRECTION_AUTHORITY: float = 0.25    # Fraction of DELTA_MAX for agent corrections
 ACTION_SMOOTHING_ALPHA: float = 0.15  # Low-pass filter coefficient for action smoothing
 
 
