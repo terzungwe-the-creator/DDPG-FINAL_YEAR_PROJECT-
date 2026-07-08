@@ -74,7 +74,10 @@ class _SubBuffer:
         probs = self.priorities[:self._size] ** self.alpha
         probs /= probs.sum()
         
-        indices = np.random.choice(self._size, size=n, p=probs, replace=False)
+        if n > self._size:
+            indices = np.random.choice(self._size, size=n, p=probs, replace=True)
+        else:
+            indices = np.random.choice(self._size, size=n, p=probs, replace=False)
         
         weights = (self._size * probs[indices]) ** (-beta)
         weights /= weights.max()
