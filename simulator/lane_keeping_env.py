@@ -295,9 +295,19 @@ class LaneKeepingEnv(gym.Env):
             s_preview = self.arc_length_s + v_x * preview_time
             kappa_preview = profile.get_kappa_at_s(s_preview)
         else:
-            kappa_ref = getattr(self, '_last_kappa', 0.0)
-            v_x = cfg.V_REFERENCE
-            kappa_preview = kappa_ref
+            if self.carla_bridge is not None and self.carla_bridge.vehicle is not None:
+                kappa_ref = self.carla_bridge._compute_curvature()
+                v_x, _ = self.carla_bridge._get_velocities()
+                kappa_la1, _ = self.carla_bridge._get_lookahead_curvature()
+                
+                v_x = max(v_x, 1.0)
+                # Blend current and lookahead based on speed (matches vehicle_bridge.py)
+                preview_blend = min(v_x / 20.0, 1.0)
+                kappa_preview = (1.0 - preview_blend) * kappa_ref + preview_blend * kappa_la1
+            else:
+                kappa_ref = getattr(self, '_last_kappa', 0.0)
+                v_x = cfg.V_REFERENCE
+                kappa_preview = kappa_ref
 
         # Understeer gradient: K_us = (m/L) * (l_r/C_af - l_f/C_ar)
         # Equivalent to standard Wf/Caf - Wr/Car when used with delta = L*kappa + K_us*v^2*kappa
