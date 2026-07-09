@@ -80,7 +80,7 @@ NORM_KAPPA_LA2: float = 0.05                   # 1/m — 2s lookahead curvature
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 REWARD_W_LATERAL: float = 8.0    # Dominant: lane keeping is the primary control objective
-REWARD_W_HEADING: float = 2.0    # Secondary: heading alignment for curve tracking
+REWARD_W_HEADING: float = 4.0    # Increased: heading RMSE fails on SCN-03/04, needs stronger alignment signal
 REWARD_W_SMOOTH: float = 1.0     # Moderate: penalise jerky steering without drowning lateral
 REWARD_W_PROGRESS: float = 0.3   # Small: prevents zero-speed policy collapse
 REWARD_W_BOUNDARY: float = 3.0   # Boundary proximity penalty weight (§3.5 code review)

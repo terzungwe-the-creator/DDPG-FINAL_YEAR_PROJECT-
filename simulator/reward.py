@@ -54,7 +54,7 @@ def reward_lateral(e_lat: float) -> float:
         Scalar reward in [0, 1].
     """
     normalised = e_lat / cfg.LANE_WIDTH_HALF
-    return float(np.exp(-5.0 * normalised ** 2))
+    return float(np.exp(-15.0 * normalised ** 2))
 
 
 def reward_heading(e_psi: float) -> float:
