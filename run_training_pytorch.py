@@ -194,29 +194,14 @@ class RMSEWeightedCurriculum:
         self.scenario_pool = self.SCENARIOS[:2]
 
     def sample_scenario(self, episode: int) -> str:
-        """Sample scenario with RMSE-exponential probability."""
+        """Pure round-robin: guaranteed equal training across all scenarios.
+        Research shows balanced replay prevents catastrophic forgetting."""
         if episode < self.warmup_episodes:
             pool = self.SCENARIOS[:2]
         else:
             pool = self.SCENARIOS
         self.scenario_pool = pool
-
-        weights = []
-        for scn in pool:
-            history = self.scene_rmse_history[scn]
-            if len(history) == 0:
-                weights.append(10.0)  # Very high priority for unseen scenes
-            else:
-                recent_rmse = np.mean(history[-self.rmse_window:])
-                # Linear oversampling: struggling scenes get up to ~3x, not 76x
-                weights.append(1.0 + recent_rmse * 2.0)
-
-        weights = np.array(weights)
-        # Enforce minimum 15% floor per scene to prevent catastrophic forgetting
-        min_weight = 0.15 * len(pool)
-        weights = np.maximum(weights, min_weight / len(pool) * weights.sum())
-        weights /= weights.sum()
-        return np.random.choice(pool, p=weights)
+        return pool[episode % len(pool)]
 
     def update(self, scenario_id: str, passed: bool, rmse: float = 0.0):
         """Update with both pass/fail and RMSE for richer weighting."""
