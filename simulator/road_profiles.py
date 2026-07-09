@@ -108,7 +108,7 @@ class RoadProfile:
         return float(self._kappa_lut[idx])
 
     def get_lookahead_kappa(self, s: float, v_x: float,
-                            lookahead_times: tuple[float, float] = (1.0, 2.0)
+                            lookahead_times: tuple[float, float] = (1.5, 3.0)
                             ) -> tuple[float, float]:
         """
         Compute curvature at lookahead positions using fast LUT.
