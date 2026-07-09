@@ -128,22 +128,19 @@ class Env:
             self.delta_prev/cfg.NORM_DELTA, k1/cfg.NORM_KAPPA_LA1, k2/cfg.NORM_KAPPA_LA2], dtype=np.float32)
         if self.training:
             obs[0] += self.difficulty_scale * self.dr.params.camera_bias_m / cfg.NORM_E_LAT
-            if self.difficulty_scale > 0.5 and np.random.rand() < (0.01 * self.difficulty_scale):
-                obs[0] = 0.0; obs[1] = 0.0
-            # Component 4: Per-channel curvature-proportional noise
-            # Higher noise on curvature-related channels when curvature is high
-            # Forces agent to not over-rely on lookahead on curves
+            # Flat observation noise — same level for all channels
+            # (curvature-proportional noise was teaching agent to IGNORE
+            #  lookahead on curves, directly sabotaging SCN-03 performance)
             base_noise = 0.02 * self.difficulty_scale
-            kappa_noise_scale = 1.0 + 3.0 * min(abs(k) / 0.02, 2.0)  # Up to 7x on tight curves
             per_channel_std = np.array([
                 base_noise,                          # e_lat
                 base_noise * 0.5,                    # e_psi
-                base_noise * kappa_noise_scale,      # kappa_ref
+                base_noise,                          # kappa_ref
                 base_noise,                          # v_y
                 base_noise,                          # yaw_rate
-                base_noise * 0.3,                    # delta_prev (less noise on own state)
-                base_noise * kappa_noise_scale,      # kappa_la1 (curvature-proportional)
-                base_noise * kappa_noise_scale,      # kappa_la2 (curvature-proportional)
+                base_noise * 0.3,                    # delta_prev
+                base_noise,                          # kappa_la1
+                base_noise,                          # kappa_la2
             ], dtype=np.float32)
             obs += np.random.normal(0, 1, obs.shape).astype(np.float32) * per_channel_std
             if self.difficulty_scale > 0.2:
