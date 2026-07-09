@@ -224,6 +224,7 @@ def run_training(args: argparse.Namespace) -> dict:
 
     device = args.device or cfg.get_device()
     logger.info(f"Device: {device}")
+    logger.info(f"Backend: {args.backend}")
     logger.info(f"Episodes: {args.episodes}")
     logger.info(f"Seed: {args.seed}")
     logger.info(f"Skip DS-01: {args.skip_ds01}")
@@ -232,6 +233,7 @@ def run_training(args: argparse.Namespace) -> dict:
 
     trainer = Trainer(
         device=device,
+        backend=args.backend,
         skip_ds01=args.skip_ds01,
         skip_ds02=args.skip_ds02,
         skip_ds03=args.skip_ds03,
@@ -268,7 +270,7 @@ def run_evaluation(args: argparse.Namespace, trainer_result: dict = None) -> dic
 
     # Create agent and load checkpoint
     agent = DDPGAgent(device=device)
-    env = LaneKeepingEnv(training_mode=False)
+    env = LaneKeepingEnv(backend=args.backend, training_mode=False)
 
     if args.checkpoint:
         ckpt_path = Path(args.checkpoint)

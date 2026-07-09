@@ -123,6 +123,7 @@ class Trainer:
     def __init__(
         self,
         device: str = "cpu",
+        backend: str = "bicycle",
         skip_ds01: bool = False,
         skip_ds02: bool = False,
         skip_ds03: bool = False,
@@ -131,6 +132,7 @@ class Trainer:
         seed: int = cfg.SEED,
     ) -> None:
         self.device = device
+        self.backend = backend
         self.skip_ds01 = skip_ds01
         self.skip_ds02 = skip_ds02
         self.skip_ds03 = skip_ds03
@@ -144,7 +146,7 @@ class Trainer:
         torch.manual_seed(seed)
 
         # Create components
-        self.env = LaneKeepingEnv()
+        self.env = LaneKeepingEnv(backend=self.backend)
         self.agent = DDPGAgent(device=device)
         self.buffer = HybridStratifiedBuffer(device=device)
         self.noise = OUNoise()

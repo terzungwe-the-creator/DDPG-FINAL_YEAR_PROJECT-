@@ -251,6 +251,7 @@ class LaneKeepingEnv(gym.Env):
         self.delta_prev = 0.0
         self.action_prev = 0.0
         self._episode_data = []
+        self.guardian.reset()  # Gap 3 fix: reset guardian for CARLA episodes
 
         return obs, info
 
@@ -421,12 +422,20 @@ class LaneKeepingEnv(gym.Env):
         return obs, reward, terminated, truncated, info
 
     def _step_carla(self, delta_cmd: float, action_norm: float) -> tuple[np.ndarray, float, bool, bool, dict]:
-        """Execute one step using CARLA backend."""
-        obs, reward, terminated, truncated, info = self.carla_bridge.step(delta_cmd)
+        """Execute one step using CARLA backend with safety guardian."""
+        # Gap 2 fix: apply SafetyGuardian rate + angle clamping before CARLA
+        delta_safe = self.guardian.apply(delta_cmd, self.delta_prev, cfg.SIM_DT)
+
+        obs, reward, terminated, truncated, info = self.carla_bridge.step(delta_safe)
         info["scenario_id"] = self.current_scn
+        info["delta_cmd_raw"] = delta_cmd
+        info["delta_rad"] = delta_safe
+        info["guardian_handoff"] = self.guardian.check_handoff(
+            info.get("e_lat_m", 0.0)
+        )
 
         self.step_count += 1
-        self.delta_prev = delta_cmd
+        self.delta_prev = delta_safe
         self._episode_data.append(info)
 
         return obs, reward, terminated, truncated, info

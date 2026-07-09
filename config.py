@@ -191,7 +191,7 @@ PHASE2_END: int = 300
 # §10 — TRAINING PARAMETERS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-N_EPISODES: int = 1000                # Total training episodes (full training for robust convergence)
+N_EPISODES: int = 1500                # Total training episodes (extended for full multi-scene convergence)
 CHECKPOINT_INTERVAL: int = 50        # Save model every N episodes
 CONVERGENCE_WINDOW: int = 50         # Rolling window for convergence check
 

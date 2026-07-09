@@ -471,6 +471,7 @@ class CarlaBridge:
         self._delta_prev = 0.0
         self._step_count = 0
         self._episode_data = []
+        self._current_scenario_id = scenario_id  # Gap 5 fix: track scenario
 
         # Tick to stabilise physics
         if self.sync_mode:
@@ -606,7 +607,7 @@ class CarlaBridge:
         # Build info dict
         transform = self.vehicle.get_transform()
         info = {
-            "scenario_id": "",
+            "scenario_id": getattr(self, '_current_scenario_id', ''),  # Gap 5 fix
             "step": self._step_count,
             "time_s": self._step_count * cfg.SIM_DT,
             "arc_length": self._get_arc_length(),
@@ -871,8 +872,52 @@ class CarlaBridge:
                 result[key] = np.array(vals)
         return result
 
+    def set_weather_for_friction(self, friction_mu: float) -> None:
+        """
+        Map domain-randomized friction coefficient to CARLA weather preset.
+
+        Gap 6 fix: provides domain randomization parity between bicycle and
+        CARLA backends. friction_mu ∈ [0.6, 1.0] maps to weather intensity.
+
+        Args:
+            friction_mu: Road friction coefficient from DomainRandomizer.
+        """
+        if self.world is None:
+            return
+
+        try:
+            import carla
+            weather = self.world.get_weather()
+
+            if friction_mu >= 0.9:
+                # Dry conditions — clear sky
+                weather.cloudiness = 10.0
+                weather.precipitation = 0.0
+                weather.precipitation_deposits = 0.0
+                weather.wetness = 0.0
+            elif friction_mu >= 0.75:
+                # Damp conditions — light rain
+                weather.cloudiness = 50.0
+                weather.precipitation = 20.0
+                weather.precipitation_deposits = 20.0
+                weather.wetness = 30.0
+            else:
+                # Wet conditions — moderate rain
+                weather.cloudiness = 80.0
+                weather.precipitation = 60.0
+                weather.precipitation_deposits = 50.0
+                weather.wetness = 70.0
+
+            self.world.set_weather(weather)
+            logger.debug(f"CARLA weather set for friction_mu={friction_mu:.2f}")
+        except Exception as e:
+            logger.warning(f"Failed to set CARLA weather: {e}")
+
     def destroy(self) -> None:
         """Destroy all CARLA actors and reset world settings."""
+        # Gap 4 fix: clean up NPC traffic before destroying ego
+        self.destroy_traffic()
+
         if self.vehicle is not None:
             self.vehicle.destroy()
             self.vehicle = None

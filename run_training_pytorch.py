@@ -281,7 +281,7 @@ def train():
     try:
         for ep in range(NE):
             scn = curriculum.sample_scenario(ep)
-            phase = "Phase1-Warmup" if ep < 10 else ("Phase2-AllScenes" if ep < 200 else ("Phase3-Refine" if ep < 500 else "Phase4-Polish"))
+            phase = "Phase1-Warmup" if ep < 10 else ("Phase2-AllScenes" if ep < 300 else ("Phase3-Refine" if ep < 750 else "Phase4-Polish"))
 
             # Component 2: Faster difficulty ramp with higher floor
             # Start DR at 30% from ep 0, reach full by ep 400 (was 10%→full by ep 700)
@@ -366,7 +366,7 @@ def train():
                 for eval_scn in cfg.SCENARIO_IDS:
                     eval_rmses = []
                     eval_lksrs = []
-                    for trial in range(5):  # 5 trials (median still robust)
+                    for trial in range(8):  # 8 trials for stable median estimates
                         e0 = np.random.uniform(-0.15, 0.15)
                         es = eval_env.reset(scn=eval_scn, e_lat_init=e0)
                         ed = False; sc = 0
@@ -383,22 +383,20 @@ def train():
                     }
                 worst_lksr = min(sr["lksr"] for sr in scene_results.values())
                 worst_rmse = max(sr["rmse"] for sr in scene_results.values())
-                # Score: prioritize worst-case scene (minimax)
-                eval_score = worst_lksr * 10.0 + (1.0 - min(worst_rmse, 1.0))
+                # Score: sum of all per-scene LKSR + accuracy bonus
+                # (sum-based rewards partial improvements across ALL scenes,
+                #  unlike minimax which only cares about the single worst)
+                sum_lksr = sum(sr["lksr"] for sr in scene_results.values())
+                sum_acc = sum(max(0, 1.0 - sr["rmse"]) for sr in scene_results.values())
+                eval_score = sum_lksr + 0.5 * sum_acc
                 logger.info(f"  Mini-eval ep {ep+1}: worst_LKSR={worst_lksr:.3f} worst_RMSE={worst_rmse:.4f} score={eval_score:.2f}")
                 for s_id, s_res in scene_results.items():
                     logger.info(f"    {s_id}: RMSE={s_res['rmse']:.4f} LKSR={s_res['lksr']:.3f}")
 
-                # Component 7: Monotonicity guard — reject if any scene regresses > 0.05 LKSR
-                regression_detected = False
-                if best_score > 0:
-                    for s_id, s_res in scene_results.items():
-                        if best_scene_lksrs.get(s_id, 0) - s_res["lksr"] > 0.05:
-                            regression_detected = True
-                            logger.info(f"  Regression guard: {s_id} LKSR dropped "
-                                        f"{best_scene_lksrs[s_id]:.3f}→{s_res['lksr']:.3f}")
-
-                if eval_score > best_score and not regression_detected:
+                # Component 7: Regression guard — only rollback if OVERALL score drops
+                # (previously triggered on any single-scene drop, which was too aggressive
+                #  and trapped the agent at the ep-100 checkpoint forever)
+                if eval_score > best_score:
                     best_score = eval_score
                     best_rmse = worst_rmse
                     best_scene_lksrs = {s_id: sr["lksr"] for s_id, sr in scene_results.items()}
@@ -408,16 +406,19 @@ def train():
                         "critic2": {k: v.cpu().clone() for k, v in agent.critic2.state_dict().items()},
                     }
                     logger.info(f"  New best model! score={eval_score:.2f}")
-                    # Component 1: Freeze actor for 10 episodes after new best
+                    # Brief actor freeze to stabilise critic after improvement
                     actor_freeze_until = ep + 10
                     logger.info(f"  Actor frozen until ep {actor_freeze_until} (critic-only training)")
-                elif regression_detected and best_agent_state is not None:
-                    # Rollback to best model on severe regression
+                elif eval_score < best_score - 0.3 and best_agent_state is not None:
+                    # Only rollback on significant overall regression (> 0.3 score drop)
                     agent.actor.load_state_dict(best_agent_state["actor"])
                     agent.critic1.load_state_dict(best_agent_state["critic1"])
                     agent.critic2.load_state_dict(best_agent_state["critic2"])
-                    actor_freeze_until = ep + 15  # Longer freeze after rollback
+                    actor_freeze_until = ep + 30  # Longer freeze: let critic fully re-stabilise
                     logger.info(f"  ROLLBACK to best model (score={best_score:.2f}), actor frozen until ep {actor_freeze_until}")
+                else:
+                    # Score is close to best but not better — allow exploration to continue
+                    logger.info(f"  Score {eval_score:.2f} vs best {best_score:.2f} — continuing exploration")
 
             # Early stopping — relaxed thresholds for multi-scene convergence
             if len(rmh) >= 200:
