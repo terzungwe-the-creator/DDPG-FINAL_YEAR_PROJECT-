@@ -125,7 +125,7 @@ UNECE_R157_TTLD_EPSILON: float = 1e-6         # s — prevents division by zero 
 #          Fujimoto et al. (2018) TD3; Duan et al. (2016) benchmarking
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ACTOR_LR: float = 1e-4              # Conservative: actor must be stable
+ACTOR_LR: float = 5e-5              # Halved to prevent catastrophic forgetting across scenarios
 CRITIC_LR: float = 1e-3             # Critic learns faster to track shifting policy
 GAMMA: float = 0.99                  # Discount — horizon ~100 steps = 1.0 s at 100 Hz
 TAU: float = 0.005                   # Polyak averaging coefficient
@@ -191,7 +191,7 @@ PHASE2_END: int = 300
 # §10 — TRAINING PARAMETERS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-N_EPISODES: int = 1500                # Total training episodes (extended for full multi-scene convergence)
+N_EPISODES: int = 1000                # Total training episodes
 CHECKPOINT_INTERVAL: int = 50        # Save model every N episodes
 CONVERGENCE_WINDOW: int = 50         # Rolling window for convergence check
 

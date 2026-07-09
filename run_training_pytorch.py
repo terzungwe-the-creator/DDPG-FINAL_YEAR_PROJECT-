@@ -208,12 +208,12 @@ class RMSEWeightedCurriculum:
                 weights.append(10.0)  # Very high priority for unseen scenes
             else:
                 recent_rmse = np.mean(history[-self.rmse_window:])
-                # Exponential oversampling: scenes with high RMSE get sampled much more
-                weights.append(max(np.exp(recent_rmse * 5.0), 0.5))
+                # Linear oversampling: struggling scenes get up to ~3x, not 76x
+                weights.append(1.0 + recent_rmse * 2.0)
 
         weights = np.array(weights)
-        # Enforce minimum 10% floor per scene to prevent starvation
-        min_weight = 0.10 * len(pool)
+        # Enforce minimum 15% floor per scene to prevent catastrophic forgetting
+        min_weight = 0.15 * len(pool)
         weights = np.maximum(weights, min_weight / len(pool) * weights.sum())
         weights /= weights.sum()
         return np.random.choice(pool, p=weights)
@@ -281,7 +281,7 @@ def train():
     try:
         for ep in range(NE):
             scn = curriculum.sample_scenario(ep)
-            phase = "Phase1-Warmup" if ep < 10 else ("Phase2-AllScenes" if ep < 300 else ("Phase3-Refine" if ep < 750 else "Phase4-Polish"))
+            phase = "Phase1-Warmup" if ep < 10 else ("Phase2-AllScenes" if ep < 200 else ("Phase3-Refine" if ep < 500 else "Phase4-Polish"))
 
             # Component 2: Faster difficulty ramp with higher floor
             # Start DR at 30% from ep 0, reach full by ep 400 (was 10%→full by ep 700)
