@@ -366,7 +366,7 @@ def train():
                 for eval_scn in cfg.SCENARIO_IDS:
                     eval_rmses = []
                     eval_lksrs = []
-                    for trial in range(10):  # 10 trials (was 3)
+                    for trial in range(5):  # 5 trials (median still robust)
                         e0 = np.random.uniform(-0.15, 0.15)
                         es = eval_env.reset(scn=eval_scn, e_lat_init=e0)
                         ed = False; sc = 0

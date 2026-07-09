@@ -51,7 +51,7 @@ TYRE_CAR_NOMINAL: float = 94000.0   # N/rad — rear axle cornering stiffness
 
 # Simulation timestep — RK4 integration mandatory
 SIM_DT: float = 0.01                # s — 100 Hz physics update rate
-SIM_MAX_STEPS: int = 3000           # steps — 30 s max episode duration
+SIM_MAX_STEPS: int = 2000           # steps — 20 s max episode duration (sufficient for all profiles)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -137,7 +137,7 @@ WARMUP_STEPS: int = 5000             # Reduced from 20K: buffer pre-populated wi
 UPDATES_PER_STEP: int = 1            # Gradient steps per environment step (UTD ratio)
 
 # Sim-only mode overrides (activated when all datasets are skipped)
-SIM_ONLY_WARMUP_STEPS: int = 10_000  # More random exploration needed without expert data
+SIM_ONLY_WARMUP_STEPS: int = 5_000   # Reduced warmup — agent learns fast with curriculum
 SIM_ONLY_UPDATES_PER_STEP: int = 2   # Higher UTD ratio compensates for no preloaded data
 SIM_ONLY_NOISE_SIGMA_INIT: float = 0.20  # More exploration noise without expert guidance
 
@@ -191,7 +191,7 @@ PHASE2_END: int = 300
 # §10 — TRAINING PARAMETERS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-N_EPISODES: int = 1000                # Total training episodes (1000 for 5-scene diversity)
+N_EPISODES: int = 1000                # Total training episodes (full training for robust convergence)
 CHECKPOINT_INTERVAL: int = 50        # Save model every N episodes
 CONVERGENCE_WINDOW: int = 50         # Rolling window for convergence check
 
