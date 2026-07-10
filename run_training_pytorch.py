@@ -341,14 +341,15 @@ def train():
                     f"pool:{curriculum.scenario_pool}")
 
             # Component 5: Robust mini-evaluation every 50 episodes
-            # 10 trials per scene, median-based, with monotonicity guard
+            # Adaptive trials: 8 early for stability, 4 later for speed
             if (ep+1) >= 50 and (ep+1) % 50 == 0:
                 eval_env = Env(training=False)
                 scene_results = {}
+                n_trials = 4 if ep >= 300 else 8  # Fewer trials once policy is stable
                 for eval_scn in cfg.SCENARIO_IDS:
                     eval_rmses = []
                     eval_lksrs = []
-                    for trial in range(8):  # 8 trials for stable median estimates
+                    for trial in range(n_trials):
                         e0 = np.random.uniform(-0.15, 0.15)
                         es = eval_env.reset(scn=eval_scn, e_lat_init=e0)
                         ed = False; sc = 0
@@ -387,7 +388,9 @@ def train():
                         "critic1": {k: v.cpu().clone() for k, v in agent.critic1.state_dict().items()},
                         "critic2": {k: v.cpu().clone() for k, v in agent.critic2.state_dict().items()},
                     }
-                    logger.info(f"  New best model! score={eval_score:.2f}")
+                    # Save to disk immediately — survives Kaggle timeout
+                    agent.save_checkpoint(ep, suffix="_best")
+                    logger.info(f"  New best model! score={eval_score:.2f} (saved to disk)")
                     # Brief actor freeze to stabilise critic after improvement
                     actor_freeze_until = ep + 10
                     logger.info(f"  Actor frozen until ep {actor_freeze_until} (critic-only training)")
@@ -401,6 +404,13 @@ def train():
                 else:
                     # Score is close to best but not better — allow exploration to continue
                     logger.info(f"  Score {eval_score:.2f} vs best {best_score:.2f} — continuing exploration")
+
+            # Wall-clock time guard — stop training before Kaggle kills the session
+            # Leaves ~1.5 hours for final evaluation (100 episodes × 2000 steps)
+            elapsed_so_far = time.time() - t0
+            if elapsed_so_far > 37800:  # 10.5 hours
+                logger.info(f"WALL-CLOCK GUARD: {elapsed_so_far:.0f}s elapsed (>10.5h), stopping training to run evaluation")
+                break
 
             # Early stopping — relaxed thresholds for multi-scene convergence
             if len(rmh) >= 200:
