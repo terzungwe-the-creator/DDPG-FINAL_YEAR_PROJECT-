@@ -165,7 +165,7 @@ NOISE_ANNEAL_END: int = 700          # Episode when annealing completes (slower 
 
 # Feedforward preview time (s) — lookahead for anticipatory steering
 PREVIEW_TIME: float = 1.2            # 1.2s at 16.67 m/s = 20m preview (improved curve anticipation)
-CORRECTION_AUTHORITY: float = 0.70    # Fraction of DELTA_MAX for agent corrections (increased for tight curves)
+CORRECTION_AUTHORITY: float = 0.85    # Increased from 0.70: SCN-04 needs more steering headroom at peak curvature
 ACTION_SMOOTHING_ALPHA: float = 0.30  # Low-pass filter coefficient for action smoothing (faster response)
 
 
