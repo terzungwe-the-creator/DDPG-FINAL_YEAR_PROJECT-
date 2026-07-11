@@ -16,7 +16,7 @@ Optimisations:
   - Early stopping convergence detection
 """
 from __future__ import annotations
-import csv, json, logging, math, sys, time
+import argparse, csv, json, logging, math, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
@@ -213,7 +213,7 @@ class RMSEWeightedCurriculum:
 
 # ── TRAINING ──────────────────────────────────────────────────────────────────
 
-def train():
+def train(resume_path=None):
     cfg.ensure_directories()
     fh = logging.FileHandler(cfg.RESULTS_DIR/"system.log", mode="w", encoding="utf-8")
     fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)-7s] %(message)s", datefmt="%H:%M:%S"))
@@ -236,8 +236,41 @@ def train():
 
     best_agent_state = None
     best_score = -1.0
-    best_scene_lksrs = {s: 0.0 for s in cfg.SCENARIO_IDS}  # Track per-scene best LKSR
-    actor_freeze_until = -1  # Component 7: Actor freeze episode counter
+    best_scene_lksrs = {s: 0.0 for s in cfg.SCENARIO_IDS}
+    actor_freeze_until = -1
+    start_ep = 0
+
+    # ── Resume from checkpoint ────────────────────────────────────────────
+    if resume_path is not None:
+        ckpt_path = Path(resume_path)
+        if ckpt_path.exists():
+            start_ep = agent.load_checkpoint(ckpt_path) + 1
+            logger.info(f"RESUMED from {ckpt_path.name}, starting at ep {start_ep}")
+            # Re-fill replay buffer with current policy (quick warmup)
+            logger.info(f"Re-filling replay buffer with {WS} warmup steps...")
+            warmup_env = Env(training=True)
+            warmup_steps = 0
+            while warmup_steps < WS:
+                ws_scn = cfg.SCENARIO_IDS[warmup_steps % len(cfg.SCENARIO_IDS)]
+                ws_state = warmup_env.reset(scn=ws_scn, e_lat_init=np.random.uniform(-0.2, 0.2))
+                ws_done = False
+                while not ws_done and warmup_steps < WS:
+                    ws_act = agent.select_action(ws_state, add_noise=False)
+                    ws_act = np.clip(ws_act + np.random.normal(0, 0.05, ws_act.shape), -1, 1)
+                    ws_ns, ws_rw, ws_term, ws_trunc, _ = warmup_env.step(float(ws_act[0]))
+                    ws_done = ws_term or ws_trunc
+                    buf.push("sim", ws_state, ws_act, ws_rw, ws_ns, float(ws_done))
+                    ws_state = ws_ns; warmup_steps += 1
+            logger.info(f"Buffer re-filled with {buf.total_size} transitions")
+            # Store current agent as initial best
+            best_agent_state = {
+                "actor": {k: v.cpu().clone() for k, v in agent.actor.state_dict().items()},
+                "critic1": {k: v.cpu().clone() for k, v in agent.critic1.state_dict().items()},
+                "critic2": {k: v.cpu().clone() for k, v in agent.critic2.state_dict().items()},
+            }
+            best_score = 5.0  # Conservative starting score for resumed model
+        else:
+            logger.warning(f"Checkpoint not found: {ckpt_path}, training from scratch")
 
     with open(cfg.PRELOAD_STATS_PATH, "w") as f:
         json.dump({"mode":"sim-only-pytorch", "device": device}, f, indent=2)
@@ -261,7 +294,7 @@ def train():
         logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
 
     try:
-        for ep in range(NE):
+        for ep in range(start_ep, NE):
             scn = curriculum.sample_scenario(ep)
             phase = "Phase1-Warmup" if ep < 10 else ("Phase2-AllScenes" if ep < 200 else ("Phase3-Refine" if ep < 500 else "Phase4-Polish"))
 
@@ -521,8 +554,12 @@ def plot():
         logger.error(f"Plot failed: {e}")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint .pt file to resume from")
+    args = parser.parse_args()
+
     t0 = time.time()
-    agent, _, _ = train()
+    agent, _, _ = train(resume_path=args.resume)
     results, passed = evaluate(agent)
     plot()
     logger.info(f"Total: {time.time()-t0:.0f}s")
