@@ -191,13 +191,19 @@ class RMSEWeightedCurriculum:
         self.scenario_pool = self.SCENARIOS[:2]
 
     def sample_scenario(self, episode: int) -> str:
-        """Pure round-robin: guaranteed equal training across all scenarios.
-        Research shows balanced replay prevents catastrophic forgetting."""
+        """Round-robin with SCN-04 oversampling in Phase 4.
+        SCN-04 (double lane change) is the hardest scenario and needs
+        extra training to reach ISO pass thresholds."""
         if episode < self.warmup_episodes:
             pool = self.SCENARIOS[:2]
         else:
             pool = self.SCENARIOS
         self.scenario_pool = pool
+        # Phase 4 (ep >= 500): give SCN-04 double weight in the cycle
+        # Cycle becomes: SCN-01,02,03,04,05,04 → SCN-04 gets 33% instead of 20%
+        if episode >= 500 and 'SCN-04' in pool:
+            extended_pool = pool + ['SCN-04']
+            return extended_pool[episode % len(extended_pool)]
         return pool[episode % len(pool)]
 
     def update(self, scenario_id: str, passed: bool, rmse: float = 0.0):
@@ -404,7 +410,7 @@ def train(resume_path=None):
                 #  unlike minimax which only cares about the single worst)
                 sum_lksr = sum(sr["lksr"] for sr in scene_results.values())
                 sum_acc = sum(max(0, 1.0 - sr["rmse"]) for sr in scene_results.values())
-                eval_score = sum_lksr + 0.5 * sum_acc
+                eval_score = sum_lksr + 0.5 * sum_acc + worst_lksr  # Bonus for worst-scene improvement
                 logger.info(f"  Mini-eval ep {ep+1}: worst_LKSR={worst_lksr:.3f} worst_RMSE={worst_rmse:.4f} score={eval_score:.2f}")
                 for s_id, s_res in scene_results.items():
                     logger.info(f"    {s_id}: RMSE={s_res['rmse']:.4f} LKSR={s_res['lksr']:.3f}")
